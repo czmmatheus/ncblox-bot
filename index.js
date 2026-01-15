@@ -12,34 +12,36 @@ const {
   PermissionsBitField,
 } = require("discord.js");
 
-// ====== ENV ======
+// ================== CONFIG / ENV ==================
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // cargo a marcar + permissão do /logs
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null; // categoria (opcional)
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;            // cargo staff
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 
-// Canal de logs (você passou esse)
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "1461273267225497754";
+const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID || "1459480515408171217";
 
-// ====== PRICING ======
 const RATE_PER_1000 = 28;
 const PRICE_MULT = 1.30; // +30% no preço (modo com taxa)
 const PURPLE = 0x7c3aed;
 
-// ====== AUTO CLOSE ======
 const AUTO_CLOSE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// Banner que você mandou
+const BANNER_URL = "https://cdn.discordapp.com/attachments/1428217284660564125/1461373724535029893/file_000000007a1471f6bb88daa791749f60.png?ex=696a51d6&is=69690056&hm=d85d13d5a32d0c1df315724e18a5d0d6817ae91ccf4a9e27a35c27a41c966400&";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("Faltam variáveis: BOT_TOKEN, CLIENT_ID, GUILD_ID");
   process.exit(1);
 }
 if (!STAFF_ROLE_ID) {
-  console.error("Falta STAFF_ROLE_ID (ID do cargo que será marcado no ticket).");
+  console.error("Falta STAFF_ROLE_ID (ID do cargo staff).");
   process.exit(1);
 }
 
+// ================== HELPERS ==================
 function brl(n) {
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
@@ -60,58 +62,101 @@ function hasStaffRole(member) {
   return member?.roles?.cache?.has(STAFF_ROLE_ID);
 }
 
-// Guarda timers em memória (não quebra nada; só não sobrevive a restart)
+// Timers em memória (auto-close)
 const ticketTimers = new Map(); // channelId -> timeout
 
-// ====== COMMANDS ======
+function cancelTicketTimer(channelId) {
+  if (ticketTimers.has(channelId)) {
+    clearTimeout(ticketTimers.get(channelId));
+    ticketTimers.delete(channelId);
+  }
+}
+
+function parseTicketOwnerIdFromTopic(topic = "") {
+  const m = topic.match(/ticketOwner:(\d+)/);
+  return m?.[1] || null;
+}
+
+// ================== COMMANDS REGISTER ==================
 async function registerCommands() {
   const commands = [
-    new SlashCommandBuilder()
-      .setName("cmd")
-      .setDescription("Envia o painel de compra de Robux"),
-    new SlashCommandBuilder()
-      .setName("logs")
-      .setDescription("Registra uma venda (use dentro do ticket)")
-      .addNumberOption(opt =>
-        opt.setName("valor")
-          .setDescription("Valor da venda em reais (ex: 50)")
-          .setRequired(true)
-      ),
+    new SlashCommandBuilder().setName("cmd").setDescription("Painel principal (vendas)"),
+    new SlashCommandBuilder().setName("2cmd").setDescription("Painel da calculadora (sem tickets)"),
+    new SlashCommandBuilder().setName("logs").setDescription("Registra a venda do ticket (auto), dá cargo e fecha"),
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log("✅ /cmd e /logs registrados");
+  console.log("✅ /cmd /2cmd /logs registrados");
 }
 
-// ====== BOT ======
+// ================== BOT ==================
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once("ready", () => console.log(`✅ Logado como ${client.user.tag}`));
 
-async function sendPanel(channel) {
+// ================== PANELS ==================
+async function sendMainPanel(channel) {
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
-    .setTitle("Central de pedidos - Robux")
+    .setTitle("NCBlox Store")
     .setDescription(
       [
+        "**Robux & Gamepass**",
+        "",
         `• **Sem taxa:** 1000 = ${brl(RATE_PER_1000)}`,
         `• **Com taxa (+30% no preço):** 1000 = ${brl(RATE_PER_1000 * PRICE_MULT)}`,
         "",
-        "Clique em **Comprar** para abrir um ticket com seu pedido.",
+        "Escolha uma opção abaixo:",
       ].join("\n")
-    );
+    )
+    .setImage(BANNER_URL);
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("buy")
-      .setLabel("Comprar")
-      .setStyle(ButtonStyle.Primary)
+      .setCustomId("buy_robux")
+      .setLabel("Comprar Robux")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("send_gamepass")
+      .setLabel("Enviar Gamepass (in-game)")
+      .setStyle(ButtonStyle.Secondary),
   );
 
   await channel.send({ embeds: [embed], components: [row] });
 }
 
+async function sendCalcPanel(channel) {
+  const embed = new EmbedBuilder()
+    .setColor(PURPLE)
+    .setTitle("NCBlox Store")
+    .setDescription(
+      [
+        "**Calculadora de Robux**",
+        "",
+        `• Base: **1000 = ${brl(RATE_PER_1000)}**`,
+        `• Com taxa: **+30% no preço**`,
+        "",
+        "Clique em uma opção para calcular:",
+      ].join("\n")
+    )
+    .setImage(BANNER_URL);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("calc_no_tax")
+      .setLabel("Calcular (Sem taxa)")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("calc_with_tax")
+      .setLabel("Calcular (Com taxa)")
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+}
+
+// ================== TICKET CREATION ==================
 async function createTicketChannel(guild, user) {
   const safeName = (user.username || "user")
     .toLowerCase()
@@ -121,10 +166,7 @@ async function createTicketChannel(guild, user) {
   const channelName = `ticket-${safeName}-${user.id.toString().slice(-4)}`;
 
   const overwrites = [
-    {
-      id: guild.roles.everyone.id,
-      deny: [PermissionsBitField.Flags.ViewChannel],
-    },
+    { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     {
       id: user.id,
       allow: [
@@ -152,7 +194,6 @@ async function createTicketChannel(guild, user) {
     },
   ];
 
-  // Topic guarda o dono + timestamp (ajuda em /logs e auditoria)
   const openedAt = Date.now();
   const topic = `ticketOwner:${user.id} openedAt:${openedAt}`;
 
@@ -168,15 +209,11 @@ async function createTicketChannel(guild, user) {
 }
 
 async function scheduleAutoClose(channel, openedAt) {
-  // cancela timer anterior se existir
-  if (ticketTimers.has(channel.id)) clearTimeout(ticketTimers.get(channel.id));
+  cancelTicketTimer(channel.id);
 
   const msLeft = Math.max(0, (openedAt + AUTO_CLOSE_MS) - Date.now());
-
   const t = setTimeout(async () => {
     try {
-      if (!channel || !channel.guild) return;
-      // se o canal ainda existir:
       await channel.send("⏳ Ticket encerrado automaticamente após **24 horas**.");
       setTimeout(async () => {
         try { await channel.delete("Auto-close 24h"); } catch {}
@@ -188,7 +225,7 @@ async function scheduleAutoClose(channel, openedAt) {
   ticketTimers.set(channel.id, t);
 }
 
-function buildCloseRow() {
+function buildTicketButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("close_ticket")
@@ -197,36 +234,99 @@ function buildCloseRow() {
   );
 }
 
+async function finalizeTicket(channel, reason = "Finalizado") {
+  cancelTicketTimer(channel.id);
+  setTimeout(async () => {
+    try { await channel.delete(reason); } catch {}
+  }, 5000);
+}
+
+// ================== ORDER EXTRACTION FOR /logs ==================
+async function extractOrderFromTicket(channel) {
+  const msgs = await channel.messages.fetch({ limit: 50 });
+
+  for (const [, msg] of msgs) {
+    if (!msg.author || msg.author.id !== client.user.id) continue;
+    if (!msg.embeds || msg.embeds.length === 0) continue;
+
+    const e = msg.embeds[0];
+    const title = (e.title || "").toLowerCase();
+    const desc = e.description || "";
+
+    // embed de Robux
+    if (title.includes("novo pedido") && title.includes("robux")) {
+      const robuxMatch = desc.match(/\*\*Robux:\*\*\s*([0-9]+)/i);
+      const totalMatch = desc.match(/\*\*Total:\*\*\s*R\$\s*([0-9.,]+)/i);
+      const modoMatch = desc.match(/\*\*Modo:\*\*\s*(.+)/i);
+
+      const robux = robuxMatch ? Number(robuxMatch[1]) : null;
+      const totalStr = totalMatch ? totalMatch[1] : null;
+      const modo = modoMatch ? modoMatch[1].split("\n")[0].trim() : "—";
+
+      let total = null;
+      if (totalStr) {
+        total = Number(totalStr.replace(/\./g, "").replace(",", "."));
+        if (!Number.isFinite(total)) total = null;
+      }
+
+      if (Number.isFinite(robux) && robux > 0 && Number.isFinite(total) && total > 0) {
+        return { type: "robux", robux, total: round2(total), modo };
+      }
+    }
+
+    // embed de Gamepass in-game (registrar também se quiser)
+    if (title.includes("pedido") && title.includes("gamepass")) {
+      // Aqui deixamos como “sem robux”, mas você pode expandir depois
+      const totalMatch = desc.match(/\*\*Total:\*\*\s*R\$\s*([0-9.,]+)/i);
+      const totalStr = totalMatch ? totalMatch[1] : null;
+
+      let total = null;
+      if (totalStr) {
+        total = Number(totalStr.replace(/\./g, "").replace(",", "."));
+        if (!Number.isFinite(total)) total = null;
+      }
+
+      // Retorna algo útil mesmo sem robux
+      if (Number.isFinite(total) && total > 0) {
+        return { type: "gamepass", robux: null, total: round2(total), modo: "Gamepass (in-game)" };
+      }
+    }
+  }
+
+  return null;
+}
+
+// ================== INTERACTIONS ==================
 client.on("interactionCreate", async (i) => {
   try {
-    // /cmd
+    // ---------- Slash commands ----------
     if (i.isChatInputCommand() && i.commandName === "cmd") {
-      await sendPanel(i.channel);
+      await sendMainPanel(i.channel);
       return i.reply({ content: "✅ Painel enviado.", ephemeral: true });
     }
 
-    // /logs <valor>
+    if (i.isChatInputCommand() && i.commandName === "2cmd") {
+      await sendCalcPanel(i.channel);
+      return i.reply({ content: "✅ Painel da calculadora enviado.", ephemeral: true });
+    }
+
+    // /logs (auto: registra, dá comprador, fecha)
     if (i.isChatInputCommand() && i.commandName === "logs") {
-      // Só staff
       if (!hasStaffRole(i.member)) {
         return i.reply({ content: "❌ Você não tem permissão para usar /logs.", ephemeral: true });
       }
 
-      const valor = i.options.getNumber("valor", true);
-      if (!Number.isFinite(valor) || valor <= 0) {
-        return i.reply({ content: "❌ Valor inválido.", ephemeral: true });
+      const channel = i.channel;
+      const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
+      if (!ownerId) {
+        return i.reply({ content: "❌ Use /logs dentro de um ticket criado pelo bot.", ephemeral: true });
       }
 
-      const channel = i.channel;
-      const topic = channel?.topic || "";
-      const m = topic.match(/ticketOwner:(\d+)/);
-      const ownerId = m?.[1];
+      await i.deferReply({ ephemeral: true });
 
-      if (!ownerId) {
-        return i.reply({
-          content: "❌ Não achei o dono do ticket (topic sem ticketOwner). Use /logs dentro de um ticket criado pelo bot.",
-          ephemeral: true,
-        });
+      const order = await extractOrderFromTicket(channel);
+      if (!order) {
+        return i.editReply("❌ Não achei o pedido nesse ticket (embed do bot).");
       }
 
       const dateStr = formatDateDDMMYY(new Date());
@@ -237,30 +337,50 @@ client.on("interactionCreate", async (i) => {
         .setTitle("📌 Venda registrada")
         .addFields(
           { name: "Usuário", value: `<@${ownerId}>`, inline: true },
-          { name: "Valor", value: brl(round2(valor)), inline: true },
+          { name: "Total", value: brl(order.total), inline: true },
           { name: "Data", value: dateStr, inline: true },
+          { name: "Modo", value: order.modo, inline: false },
           { name: "Ticket", value: `${channel}`, inline: false },
-          { name: "Registrado por", value: `<@${i.user.id}>`, inline: false },
+          { name: "Staff", value: `<@${i.user.id}>`, inline: false },
         );
 
-      // Confirma no ticket
-      await i.reply({ content: "✅ Venda registrada.", ephemeral: true });
+      if (order.type === "robux") {
+        embed.addFields({ name: "Robux", value: `${order.robux}`, inline: true });
+      }
 
-      // Envia no canal de logs
       if (logChannel && logChannel.isTextBased()) {
         await logChannel.send({ embeds: [embed] });
       } else {
-        // se o canal de logs não existe/sem permissão, pelo menos posta no ticket
-        await channel.send({ content: "⚠️ Não consegui enviar no canal de logs. Verifique LOG_CHANNEL_ID/permissões.", embeds: [embed] });
+        await channel.send({ content: "⚠️ Canal de logs inválido/sem permissão.", embeds: [embed] });
       }
 
+      // Dá cargo comprador
+      let buyerAdded = false;
+      try {
+        const member = await i.guild.members.fetch(ownerId);
+        if (member && !member.roles.cache.has(BUYER_ROLE_ID)) {
+          await member.roles.add(BUYER_ROLE_ID, "Compra registrada via /logs");
+        }
+        buyerAdded = true;
+      } catch (err) {
+        console.error("ERRO ao adicionar cargo Comprador:", err);
+      }
+
+      await channel.send(
+        `✅ Venda registrada por <@${i.user.id}>.\n` +
+        `🏷️ Cargo **Comprador** ${buyerAdded ? "aplicado" : "NÃO aplicado (verifique hierarquia/permissões)"} para <@${ownerId}>.\n` +
+        `🔒 Ticket será fechado em 5 segundos...`
+      );
+
+      await i.editReply("✅ Log registrado. Fechando ticket...");
+      await finalizeTicket(channel, "Venda finalizada via /logs");
       return;
     }
 
-    // botão comprar
-    if (i.isButton() && i.customId === "buy") {
+    // ---------- Main panel buttons ----------
+    if (i.isButton() && i.customId === "buy_robux") {
       const menu = new StringSelectMenuBuilder()
-        .setCustomId("mode")
+        .setCustomId("robux_mode")
         .setPlaceholder("Escolha o modo")
         .addOptions([
           { label: "Sem taxa", value: "no_tax" },
@@ -274,12 +394,44 @@ client.on("interactionCreate", async (i) => {
       });
     }
 
-    // escolheu modo -> modal
-    if (i.isStringSelectMenu() && i.customId === "mode") {
+    if (i.isButton() && i.customId === "send_gamepass") {
+      const modal = new ModalBuilder()
+        .setCustomId("gamepass_modal")
+        .setTitle("Enviar Gamepass (in-game)");
+
+      const nick = new TextInputBuilder()
+        .setCustomId("nick")
+        .setLabel("Nick do Roblox")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const link = new TextInputBuilder()
+        .setCustomId("gplink")
+        .setLabel("Link da Gamepass (ou ID)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const info = new TextInputBuilder()
+        .setCustomId("info")
+        .setLabel("Detalhes (opcional)")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(nick),
+        new ActionRowBuilder().addComponents(link),
+        new ActionRowBuilder().addComponents(info),
+      );
+
+      return i.showModal(modal);
+    }
+
+    // ---------- Robux mode select -> modal ----------
+    if (i.isStringSelectMenu() && i.customId === "robux_mode") {
       const mode = i.values[0]; // no_tax | with_tax
 
       const modal = new ModalBuilder()
-        .setCustomId(`order:${mode}`)
+        .setCustomId(`robux_order:${mode}`)
         .setTitle("Pedido de Robux");
 
       const nick = new TextInputBuilder()
@@ -302,9 +454,27 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(modal);
     }
 
-    // enviou modal -> cria ticket + posta infos + marca staff + botão fechar + auto-close 24h
-    if (i.isModalSubmit() && i.customId.startsWith("order:")) {
-      await i.deferReply({ ephemeral: true }); // evita "Interaction failed"
+    // ---------- Calculator panel buttons ----------
+    if (i.isButton() && (i.customId === "calc_no_tax" || i.customId === "calc_with_tax")) {
+      const withTax = i.customId === "calc_with_tax";
+
+      const modal = new ModalBuilder()
+        .setCustomId(`calc_modal:${withTax ? "with" : "no"}`)
+        .setTitle(withTax ? "Calculadora (Com taxa)" : "Calculadora (Sem taxa)");
+
+      const robux = new TextInputBuilder()
+        .setCustomId("robux")
+        .setLabel("Quantidade de Robux")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(robux));
+      return i.showModal(modal);
+    }
+
+    // ---------- Submit: Robux order -> ticket ----------
+    if (i.isModalSubmit() && i.customId.startsWith("robux_order:")) {
+      await i.deferReply({ ephemeral: true });
 
       const mode = i.customId.split(":")[1];
       const withTax = mode === "with_tax";
@@ -314,12 +484,11 @@ client.on("interactionCreate", async (i) => {
       const robux = Number(robuxRaw.replace(/[^\d]/g, ""));
 
       if (!Number.isFinite(robux) || robux <= 0) {
-        return i.editReply({ content: "❌ Quantidade inválida." });
+        return i.editReply("❌ Quantidade inválida.");
       }
 
       const total = round2(priceBRL(robux, withTax));
 
-      // Cria canal
       let ticket, openedAt;
       try {
         const res = await createTicketChannel(i.guild, i.user);
@@ -327,15 +496,13 @@ client.on("interactionCreate", async (i) => {
         openedAt = res.openedAt;
       } catch (err) {
         console.error("ERRO criando ticket:", err);
-        return i.editReply({
-          content:
-            "❌ Não consegui criar o canal do ticket.\n" +
-            "Verifique se o bot tem **Gerenciar canais** e acesso à categoria.\n" +
-            `Erro: \`${err?.message || "desconhecido"}\``,
-        });
+        return i.editReply(
+          "❌ Não consegui criar o canal do ticket.\n" +
+          "Verifique se o bot tem **Gerenciar canais** e acesso à categoria.\n" +
+          `Erro: \`${err?.message || "desconhecido"}\``
+        );
       }
 
-      // Mensagem no ticket + botão fechar
       const embed = new EmbedBuilder()
         .setColor(PURPLE)
         .setTitle("🧾 Novo pedido de Robux")
@@ -352,30 +519,104 @@ client.on("interactionCreate", async (i) => {
             "2) Envie o link aqui no ticket",
             "",
             "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "",
+            "✅ Quando finalizar a venda, o staff usa **/logs** para registrar, dar cargo e fechar.",
           ].join("\n")
         );
 
       await ticket.send({
         content: `<@&${STAFF_ROLE_ID}> Novo pedido!`,
         embeds: [embed],
-        components: [buildCloseRow()],
+        components: [buildTicketButtons()],
       });
 
-      // agenda auto-close em 24h
       await scheduleAutoClose(ticket, openedAt);
-
-      // Resposta pro usuário
-      return i.editReply({ content: `✅ Ticket criado: ${ticket}` });
+      return i.editReply(`✅ Ticket criado: ${ticket}`);
     }
 
-    // botão fechar ticket
+    // ---------- Submit: Gamepass in-game -> ticket ----------
+    if (i.isModalSubmit() && i.customId === "gamepass_modal") {
+      await i.deferReply({ ephemeral: true });
+
+      const nick = i.fields.getTextInputValue("nick").trim();
+      const gplink = i.fields.getTextInputValue("gplink").trim();
+      const info = (i.fields.getTextInputValue("info") || "").trim();
+
+      let ticket, openedAt;
+      try {
+        const res = await createTicketChannel(i.guild, i.user);
+        ticket = res.channel;
+        openedAt = res.openedAt;
+      } catch (err) {
+        console.error("ERRO criando ticket:", err);
+        return i.editReply(
+          "❌ Não consegui criar o canal do ticket.\n" +
+          "Verifique se o bot tem **Gerenciar canais** e acesso à categoria.\n" +
+          `Erro: \`${err?.message || "desconhecido"}\``
+        );
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(PURPLE)
+        .setTitle("🎮 Pedido de Gamepass (in-game)")
+        .setDescription(
+          [
+            `**Cliente:** <@${i.user.id}>`,
+            `**Nick:** ${nick}`,
+            `**Gamepass:** ${gplink}`,
+            info ? `**Detalhes:** ${info}` : null,
+            "",
+            "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "",
+            "✅ Quando finalizar a venda, o staff pode usar **/logs** (se houver total definido).",
+          ].filter(Boolean).join("\n")
+        );
+
+      await ticket.send({
+        content: `<@&${STAFF_ROLE_ID}> Novo pedido (Gamepass)!`,
+        embeds: [embed],
+        components: [buildTicketButtons()],
+      });
+
+      await scheduleAutoClose(ticket, openedAt);
+      return i.editReply(`✅ Ticket criado: ${ticket}`);
+    }
+
+    // ---------- Submit: Calculator ----------
+    if (i.isModalSubmit() && i.customId.startsWith("calc_modal:")) {
+      const mode = i.customId.split(":")[1]; // with | no
+      const withTax = mode === "with";
+
+      const robuxRaw = i.fields.getTextInputValue("robux").trim();
+      const robux = Number(robuxRaw.replace(/[^\d]/g, ""));
+
+      if (!Number.isFinite(robux) || robux <= 0) {
+        return i.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
+      }
+
+      const total = round2(priceBRL(robux, withTax));
+      const other = round2(priceBRL(robux, !withTax));
+
+      const embed = new EmbedBuilder()
+        .setColor(PURPLE)
+        .setTitle("🧮 Resultado da calculadora")
+        .setDescription(
+          [
+            `**Robux:** ${robux}`,
+            `**Base:** 1000 = ${brl(RATE_PER_1000)}`,
+            "",
+            `**${withTax ? "Com taxa (+30%)" : "Sem taxa"}:** ${brl(total)}`,
+            `**${withTax ? "Sem taxa" : "Com taxa (+30%)"}:** ${brl(other)}`,
+          ].join("\n")
+        );
+
+      return i.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // ---------- Close ticket button ----------
     if (i.isButton() && i.customId === "close_ticket") {
       const channel = i.channel;
-
-      // Permissão: staff OU dono do ticket
-      const topic = channel?.topic || "";
-      const m = topic.match(/ticketOwner:(\d+)/);
-      const ownerId = m?.[1];
+      const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
 
       const isOwner = ownerId && i.user.id === ownerId;
       const isStaff = hasStaffRole(i.member);
@@ -385,29 +626,19 @@ client.on("interactionCreate", async (i) => {
       }
 
       await i.reply({ content: "🔒 Fechando ticket em 5 segundos...", ephemeral: true });
-
-      // cancela timer
-      if (ticketTimers.has(channel.id)) {
-        clearTimeout(ticketTimers.get(channel.id));
-        ticketTimers.delete(channel.id);
-      }
-
-      setTimeout(async () => {
-        try { await channel.delete("Ticket fechado"); } catch {}
-      }, 5000);
-
+      await finalizeTicket(channel, "Ticket fechado manualmente");
       return;
     }
 
   } catch (e) {
     console.error(e);
     if (i.isRepliable()) {
-      try { await i.reply({ content: "❌ Erro. Veja os logs.", ephemeral: true }); } catch {}
+      try { await i.reply({ content: "❌ Erro. Veja os logs do Railway.", ephemeral: true }); } catch {}
     }
   }
 });
 
-// ===== START =====
+// ================== START ==================
 (async () => {
   await registerCommands();
   await client.login(TOKEN);
