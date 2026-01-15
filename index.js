@@ -36,7 +36,7 @@ function priceBRL(robux, withTax) {
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
-      .setName("painel")
+      .setName("cmd")
       .setDescription("Envia o painel de compra de Robux")
       .toJSON(),
   ];
