@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-
 const {
   Client, GatewayIntentBits,
   REST, Routes,
@@ -26,12 +25,12 @@ const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "1461273267225497754";
 const BUYER_ROLE_ID = process.env.BUYER_ROLE_ID || "1459480515408171217";
 
-const RATE_PER_1000 = 28;
-const PRICE_MULT = 1.30; // +30% no preço (modo com taxa)
+const RATE_PER_1000 = 28;  // 1000 Robux = R$ 28,00
 const PURPLE = 0x7c3aed;
 
 const AUTO_CLOSE_MS = 24 * 60 * 60 * 1000; // 24h
 
+// Banner
 const BANNER_URL = "https://cdn.discordapp.com/attachments/1428217284660564125/1461373724535029893/file_000000007a1471f6bb88daa791749f60.png?ex=696a51d6&is=69690056&hm=d85d13d5a32d0c1df315724e18a5d0d6817ae91ccf4a9e27a35c27a41c966400&";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -43,44 +42,42 @@ if (!STAFF_ROLE_ID) {
   process.exit(1);
 }
 
-// ================== STOCK (persistente) ==================
-const STOCK_FILE = path.join(__dirname, "stock.json");
+// ================== STOCK JSON ==================
+const STOCK_PATH = path.join(__dirname, "stock.json");
 
 function ensureStockFile() {
-  if (!fs.existsSync(STOCK_FILE)) {
-    fs.writeFileSync(
-      STOCK_FILE,
-      JSON.stringify({ stock: 0, panelMessageId: null, panelChannelId: null }, null, 2),
-      "utf8"
-    );
+  if (!fs.existsSync(STOCK_PATH)) {
+    fs.writeFileSync(STOCK_PATH, JSON.stringify({
+      stock: 0,
+      panelMessageId: null,
+      panelChannelId: null
+    }, null, 2));
   }
 }
-function readStockData() {
+
+function readStockState() {
   ensureStockFile();
   try {
-    const data = JSON.parse(fs.readFileSync(STOCK_FILE, "utf8"));
+    const raw = fs.readFileSync(STOCK_PATH, "utf8");
+    const data = JSON.parse(raw);
     return {
       stock: Number(data.stock) || 0,
-      panelMessageId: data.panelMessageId ?? null,
-      panelChannelId: data.panelChannelId ?? null,
+      panelMessageId: data.panelMessageId || null,
+      panelChannelId: data.panelChannelId || null,
     };
   } catch {
     return { stock: 0, panelMessageId: null, panelChannelId: null };
   }
 }
-function writeStockData(obj) {
+
+function writeStockState(next) {
   ensureStockFile();
-  fs.writeFileSync(STOCK_FILE, JSON.stringify(obj, null, 2), "utf8");
+  fs.writeFileSync(STOCK_PATH, JSON.stringify(next, null, 2));
 }
 
-function formatStock(n) {
-  return Math.max(0, Number(n) || 0).toLocaleString("pt-BR");
-}
-function stockBadge(stock) {
-  if (stock <= 0) return "🔴 **SEM STOCK**";
-  if (stock < 1000) return "🔴 **BAIXO**";
-  if (stock < 5000) return "🟡 **MÉDIO**";
-  return "🟢 **OK**";
+function formatRobux(n) {
+  const x = Number(n) || 0;
+  return x.toLocaleString("pt-BR");
 }
 
 // ================== HELPERS ==================
@@ -90,9 +87,9 @@ function brl(n) {
 function round2(n) {
   return Math.round(n * 100) / 100;
 }
-function priceBRL(robux, withTax) {
+function priceBRLFromRobux(robux) {
   const base = (robux / 1000) * RATE_PER_1000;
-  return withTax ? base * PRICE_MULT : base;
+  return base;
 }
 function formatDateDDMMYY(date = new Date()) {
   const dd = String(date.getDate()).padStart(2, "0");
@@ -104,46 +101,84 @@ function hasStaffRole(member) {
   return member?.roles?.cache?.has(STAFF_ROLE_ID);
 }
 
-// ================== ROBLOX GAMEPASS (pega Nome + Robux) ==================
-function extractGamePassId(urlOrId = "") {
-  const s = String(urlOrId).trim();
-  const m = s.match(/game-pass\/(\d+)/i);
-  if (m?.[1]) return m[1];
-  if (/^\d{6,}$/.test(s)) return s;
-  return null;
+// ================== ROBLOX 30% (CORRIGIDO) ==================
+const ROBLOX_FEE = 0.30;
+const NET_RATE = 1 - ROBLOX_FEE;       // 0.70
+const COVER_FEE_MULT = 1 / NET_RATE;   // 1.42857...
+
+// Se você quer RECEBER X robux (líquido), precisa cobrar:
+function requiredRobuxToCoverFee(desiredNetRobux) {
+  return Math.ceil(desiredNetRobux * COVER_FEE_MULT);
 }
 
-async function fetchGamePassInfo(gamepassId) {
-  // API oficial que retorna Nome e PriceInRobux
-  const api = `https://economy.roblox.com/v1/game-pass/${gamepassId}/game-pass-product-info`;
-  const res = await fetch(api, {
-    headers: {
-      "accept": "application/json",
-      "user-agent": "Mozilla/5.0"
-    }
-  });
+// ================== GAMEPASS LINK READER (TENTATIVA FORTE) ==================
+function extractGamepassId(text = "") {
+  const m = String(text).match(/game-pass\/(\d+)/i);
+  return m ? m[1] : null;
+}
 
-  if (!res.ok) throw new Error(`Roblox API falhou: ${res.status}`);
-  const j = await res.json();
+// usa endpoint product-info (Node 18+ tem fetch global; Railway costuma ter)
+async function fetchGamepassInfo(gamepassId) {
+  const url = `https://economy.roblox.com/v1/game-passes/${gamepassId}/product-info`;
 
-  const name = j?.Name || j?.name || "Gamepass";
-  const robux = Number(j?.PriceInRobux ?? j?.priceInRobux);
-  if (!Number.isFinite(robux)) throw new Error("Preço em Robux não encontrado");
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        "accept": "application/json",
+      },
+    });
 
-  return { name, robux };
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    const name = data?.Name || null;
+    const price = Number(data?.PriceInRobux);
+
+    if (!name || !Number.isFinite(price)) return null;
+    return { name, price };
+  } catch {
+    return null;
+  }
 }
 
 // ================== BOT ==================
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages, // necessário para fetch de mensagens no ticket
+  ]
+});
 
 client.once("ready", async () => {
   console.log(`✅ Logado como ${client.user.tag}`);
-  // Tenta atualizar painel ao iniciar (se já existir)
-  try { await updatePanelMessage(); } catch {}
+
+  // tenta atualizar painel quando liga
+  try { await updatePanelIfExists(); } catch {}
 });
 
-// ================== PANEL (cria + atualiza) ==================
-function buildMainPanelEmbed(stock) {
+// ================== COMMANDS REGISTER ==================
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder().setName("cmd").setDescription("Painel principal (vendas)"),
+    new SlashCommandBuilder().setName("2cmd").setDescription("Painel da calculadora (sem tickets)"),
+    new SlashCommandBuilder().setName("logs").setDescription("Registra a venda do ticket (auto), dá cargo, fecha e desconta stock"),
+    new SlashCommandBuilder()
+      .setName("stock")
+      .setDescription("Altera o stock (ex: /stock 10000 ou /stock -100)")
+      .addIntegerOption(o => o.setName("quantidade").setDescription("Número (use negativo para remover)").setRequired(true)),
+  ].map(c => c.toJSON());
+
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  console.log("✅ /cmd /2cmd /logs /stock registrados");
+}
+
+// ================== PANELS ==================
+function buildMainPanelEmbed(stockValue) {
+  const ok = stockValue > 0;
+  const status = ok ? "🟢 OK" : "🔴 SEM STOCK";
+
   return new EmbedBuilder()
     .setColor(PURPLE)
     .setTitle("𝗡𝗖 𝗕𝗟𝗢𝗫")
@@ -151,16 +186,16 @@ function buildMainPanelEmbed(stock) {
       [
         "**Robux & Gamepass**",
         "",
-        "📦 **𝗦𝗧𝗢𝗖𝗞 𝗔𝗧𝗨𝗔𝗟**",
-        `➡️ **${formatStock(stock)} ROBUX DISPONÍVEIS** ${stockBadge(stock)}`,
+        "📦 **STOCK ATUAL**",
+        `➡️ **${formatRobux(stockValue)} ROBUX DISPONÍVEIS**  ${status}`,
         "",
         "💰 **Preços**",
         `• 1000 Robux = ${brl(RATE_PER_1000)}`,
-        `• Com taxa (+30%) = ${brl(RATE_PER_1000 * PRICE_MULT)}`,
+        `• **Com taxa Roblox (30%)**: o bot calcula o Robux necessário pra você receber o líquido`,
         "",
         "🔒 Compras via **ticket**",
-        "📄 Vendas registradas",
-        "🏷️ Cargo comprador",
+        "✅ Vendas registradas",
+        "🏷️ Cargo de comprador",
         "",
         "👇 Selecione uma opção abaixo",
       ].join("\n")
@@ -168,40 +203,60 @@ function buildMainPanelEmbed(stock) {
     .setImage(BANNER_URL);
 }
 
-function buildMainPanelRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("buy_robux").setLabel("Comprar Robux").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("send_gamepass").setLabel("Enviar Gamepass (in-game)").setStyle(ButtonStyle.Secondary),
-  );
-}
-
 async function sendMainPanel(channel) {
-  const data = readStockData();
-  const msg = await channel.send({ embeds: [buildMainPanelEmbed(data.stock)], components: [buildMainPanelRow()] });
+  const state = readStockState();
+  const embed = buildMainPanelEmbed(state.stock);
 
-  // salva os IDs pra atualizar sempre
-  data.panelChannelId = channel.id;
-  data.panelMessageId = msg.id;
-  writeStockData(data);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("buy_robux")
+      .setLabel("Comprar Robux")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("send_gamepass")
+      .setLabel("Enviar Gamepass (in-game)")
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  const msg = await channel.send({ embeds: [embed], components: [row] });
+
+  // salva IDs pra atualizar depois
+  writeStockState({
+    stock: state.stock,
+    panelMessageId: msg.id,
+    panelChannelId: channel.id
+  });
 
   return msg;
 }
 
-async function updatePanelMessage() {
-  const data = readStockData();
-  if (!data.panelChannelId || !data.panelMessageId) return false;
+async function updatePanelIfExists() {
+  const state = readStockState();
+  if (!state.panelMessageId || !state.panelChannelId) return;
 
-  const ch = await client.channels.fetch(data.panelChannelId).catch(() => null);
-  if (!ch || !ch.isTextBased()) return false;
+  const ch = await client.channels.fetch(state.panelChannelId).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
 
-  const msg = await ch.messages.fetch(data.panelMessageId).catch(() => null);
-  if (!msg) return false;
+  const msg = await ch.messages.fetch(state.panelMessageId).catch(() => null);
+  if (!msg) return;
 
-  await msg.edit({ embeds: [buildMainPanelEmbed(data.stock)], components: [buildMainPanelRow()] });
-  return true;
+  const embed = buildMainPanelEmbed(state.stock);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("buy_robux")
+      .setLabel("Comprar Robux")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("send_gamepass")
+      .setLabel("Enviar Gamepass (in-game)")
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  await msg.edit({ embeds: [embed], components: [row] }).catch(() => null);
 }
 
-// ================== CALC PANEL ==================
+// Painel calculadora (sem tickets)
 async function sendCalcPanel(channel) {
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
@@ -211,7 +266,7 @@ async function sendCalcPanel(channel) {
         "**Calculadora de Robux**",
         "",
         `• Base: **1000 = ${brl(RATE_PER_1000)}**`,
-        `• Com taxa: **+30% no preço**`,
+        `• Modo **Com taxa**: cobre os **30% do Roblox** (calcula Robux necessário)`,
         "",
         "Clique em uma opção para calcular:",
       ].join("\n")
@@ -219,15 +274,21 @@ async function sendCalcPanel(channel) {
     .setImage(BANNER_URL);
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("calc_no_tax").setLabel("Calcular (Sem taxa)").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("calc_with_tax").setLabel("Calcular (Com taxa)").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("calc_no_tax")
+      .setLabel("Calcular (Sem taxa)")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("calc_with_tax")
+      .setLabel("Calcular (Com taxa)")
+      .setStyle(ButtonStyle.Primary),
   );
 
   await channel.send({ embeds: [embed], components: [row] });
 }
 
 // ================== TICKET CREATION ==================
-const ticketTimers = new Map();
+const ticketTimers = new Map(); // channelId -> timeout
 
 function cancelTicketTimer(channelId) {
   if (ticketTimers.has(channelId)) {
@@ -235,20 +296,47 @@ function cancelTicketTimer(channelId) {
     ticketTimers.delete(channelId);
   }
 }
+
 function parseTicketOwnerIdFromTopic(topic = "") {
   const m = topic.match(/ticketOwner:(\d+)/);
   return m?.[1] || null;
 }
 
 async function createTicketChannel(guild, user) {
-  const safeName = (user.username || "user").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || "user";
+  const safeName = (user.username || "user")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 12) || "user";
+
   const channelName = `ticket-${safeName}-${user.id.toString().slice(-4)}`;
 
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-    { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-    { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-    { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] },
+    {
+      id: user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+      ],
+    },
+    {
+      id: STAFF_ROLE_ID,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+      ],
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.ReadMessageHistory,
+      ],
+    },
   ];
 
   const openedAt = Date.now();
@@ -272,7 +360,9 @@ async function scheduleAutoClose(channel, openedAt) {
   const t = setTimeout(async () => {
     try {
       await channel.send("⏳ Ticket encerrado automaticamente após **24 horas**.");
-      setTimeout(async () => { try { await channel.delete("Auto-close 24h"); } catch {} }, 5000);
+      setTimeout(async () => {
+        try { await channel.delete("Auto-close 24h"); } catch {}
+      }, 5000);
     } catch {}
     ticketTimers.delete(channel.id);
   }, msLeft);
@@ -282,16 +372,21 @@ async function scheduleAutoClose(channel, openedAt) {
 
 function buildTicketButtons() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("close_ticket").setLabel("Fechar ticket").setStyle(ButtonStyle.Danger)
+    new ButtonBuilder()
+      .setCustomId("close_ticket")
+      .setLabel("Fechar ticket")
+      .setStyle(ButtonStyle.Danger)
   );
 }
 
 async function finalizeTicket(channel, reason = "Finalizado") {
   cancelTicketTimer(channel.id);
-  setTimeout(async () => { try { await channel.delete(reason); } catch {} }, 5000);
+  setTimeout(async () => {
+    try { await channel.delete(reason); } catch {}
+  }, 5000);
 }
 
-// ================== EXTRAIR PEDIDO (para /logs e /gamepass) ==================
+// ================== ORDER EXTRACTION FOR /logs ==================
 async function extractOrderFromTicket(channel) {
   const msgs = await channel.messages.fetch({ limit: 50 });
 
@@ -303,36 +398,42 @@ async function extractOrderFromTicket(channel) {
     const title = (e.title || "").toLowerCase();
     const desc = e.description || "";
 
+    // Robux
     if (title.includes("novo pedido") && title.includes("robux")) {
-      const robuxMatch = desc.match(/\*\*Robux:\*\*\s*([0-9]+)/i);
+      const netMatch = desc.match(/\*\*Robux \(líquido\):\*\*\s*([0-9]+)/i);
+      const grossMatch = desc.match(/\*\*Robux para comprar:\*\*\s*([0-9]+)/i);
       const totalMatch = desc.match(/\*\*Total:\*\*\s*R\$\s*([0-9.,]+)/i);
       const modoMatch = desc.match(/\*\*Modo:\*\*\s*(.+)/i);
 
-      const robux = robuxMatch ? Number(robuxMatch[1]) : null;
+      const net = netMatch ? Number(netMatch[1]) : null;
+      const gross = grossMatch ? Number(grossMatch[1]) : null;
       const totalStr = totalMatch ? totalMatch[1] : null;
       const modo = modoMatch ? modoMatch[1].split("\n")[0].trim() : "—";
 
       let total = null;
-      if (totalStr) total = Number(totalStr.replace(/\./g, "").replace(",", "."));
+      if (totalStr) {
+        total = Number(totalStr.replace(/\./g, "").replace(",", "."));
+        if (!Number.isFinite(total)) total = null;
+      }
 
-      if (Number.isFinite(robux) && robux > 0 && Number.isFinite(total) && total > 0) {
-        return { type: "robux", robux, total: round2(total), modo };
+      if (Number.isFinite(net) && net > 0 && Number.isFinite(total) && total > 0) {
+        return { type: "robux", robuxNet: net, robuxGross: gross || net, total: round2(total), modo };
       }
     }
 
-    if (title.includes("pedido de gamepass")) {
-      const nameMatch = desc.match(/\*\*Gamepass:\*\*\s*(.+)/i);
-      const robuxMatch = desc.match(/\*\*Robux:\*\*\s*([0-9]+)/i);
+    // Gamepass (in-game)
+    if (title.includes("pedido") && title.includes("gamepass")) {
       const totalMatch = desc.match(/\*\*Total:\*\*\s*R\$\s*([0-9.,]+)/i);
-
-      const gpName = nameMatch ? nameMatch[1].split("\n")[0].trim() : "Gamepass";
-      const robux = robuxMatch ? Number(robuxMatch[1]) : null;
+      const totalStr = totalMatch ? totalMatch[1] : null;
 
       let total = null;
-      if (totalMatch?.[1]) total = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
+      if (totalStr) {
+        total = Number(totalStr.replace(/\./g, "").replace(",", "."));
+        if (!Number.isFinite(total)) total = null;
+      }
 
-      if (Number.isFinite(robux) && robux > 0 && Number.isFinite(total) && total > 0) {
-        return { type: "gamepass", robux, total: round2(total), modo: `Gamepass: ${gpName}` };
+      if (Number.isFinite(total) && total > 0) {
+        return { type: "gamepass", total: round2(total), modo: "Gamepass (in-game)" };
       }
     }
   }
@@ -340,160 +441,130 @@ async function extractOrderFromTicket(channel) {
   return null;
 }
 
-// ================== COMMANDS REGISTER ==================
-async function registerCommands() {
-  const commands = [
-    new SlashCommandBuilder().setName("cmd").setDescription("Painel principal (vendas)"),
-    new SlashCommandBuilder().setName("2cmd").setDescription("Painel da calculadora (sem tickets)"),
-    new SlashCommandBuilder().setName("logs").setDescription("Finaliza venda de Robux (log + cargo + fecha + desconta stock)"),
-    new SlashCommandBuilder().setName("gamepass").setDescription("Finaliza venda de Gamepass (log + cargo + fecha + desconta stock)"),
-    new SlashCommandBuilder()
-      .setName("stock")
-      .setDescription("Atualiza o stock: /stock 10000 (add) | /stock -100 (remove)")
-      .addIntegerOption(o => o.setName("valor").setDescription("Número (pode ser negativo)").setRequired(true)),
-  ].map(c => c.toJSON());
-
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log("✅ /cmd /2cmd /logs /gamepass /stock registrados");
-}
-
 // ================== INTERACTIONS ==================
 client.on("interactionCreate", async (i) => {
   try {
-    // /cmd
+    // ---------- Slash commands ----------
     if (i.isChatInputCommand() && i.commandName === "cmd") {
       await sendMainPanel(i.channel);
-      return i.reply({ content: "✅ Painel enviado e registrado.", ephemeral: true });
+      return i.reply({ content: "✅ Painel enviado.", ephemeral: true });
     }
 
-    // /2cmd
     if (i.isChatInputCommand() && i.commandName === "2cmd") {
       await sendCalcPanel(i.channel);
       return i.reply({ content: "✅ Painel da calculadora enviado.", ephemeral: true });
     }
 
-    // /stock (ADD/SUB)
     if (i.isChatInputCommand() && i.commandName === "stock") {
-      if (!hasStaffRole(i.member)) return i.reply({ content: "❌ Só staff.", ephemeral: true });
+      if (!hasStaffRole(i.member)) {
+        return i.reply({ content: "❌ Você não tem permissão para usar /stock.", ephemeral: true });
+      }
 
-      const val = i.options.getInteger("valor", true);
-      const data = readStockData();
+      const q = i.options.getInteger("quantidade", true);
+      const state = readStockState();
+      const next = Math.max(0, state.stock + q);
 
-      data.stock = Math.max(0, (Number(data.stock) || 0) + val); // + adiciona / - remove
-      writeStockData(data);
+      writeStockState({
+        stock: next,
+        panelMessageId: state.panelMessageId,
+        panelChannelId: state.panelChannelId
+      });
 
-      await updatePanelMessage().catch(() => null);
+      await updatePanelIfExists().catch(() => null);
 
-      return i.reply({ content: `📦 Stock atualizado: **${formatStock(data.stock)} Robux**`, ephemeral: true });
+      return i.reply({ content: `📦 Stock atualizado: **${formatRobux(next)} Robux**`, ephemeral: true });
     }
 
-    // /logs (Robux)
+    // /logs: registra + dá cargo + fecha + desconta stock (se for robux)
     if (i.isChatInputCommand() && i.commandName === "logs") {
-      if (!hasStaffRole(i.member)) return i.reply({ content: "❌ Só staff.", ephemeral: true });
+      if (!hasStaffRole(i.member)) {
+        return i.reply({ content: "❌ Você não tem permissão para usar /logs.", ephemeral: true });
+      }
 
-      const ownerId = parseTicketOwnerIdFromTopic(i.channel?.topic || "");
-      if (!ownerId) return i.reply({ content: "❌ Use dentro de um ticket.", ephemeral: true });
+      const channel = i.channel;
+      const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
+      if (!ownerId) {
+        return i.reply({ content: "❌ Use /logs dentro de um ticket criado pelo bot.", ephemeral: true });
+      }
 
       await i.deferReply({ ephemeral: true });
 
-      const order = await extractOrderFromTicket(i.channel);
-      if (!order || order.type !== "robux") return i.editReply("❌ Não achei pedido de ROBUX nesse ticket.");
+      const order = await extractOrderFromTicket(channel);
+      if (!order) {
+        return i.editReply("❌ Não achei o pedido nesse ticket (embed do bot).");
+      }
 
-      // desconta stock
-      const data = readStockData();
-      data.stock = Math.max(0, data.stock - order.robux);
-      writeStockData(data);
-      await updatePanelMessage().catch(() => null);
-
-      // manda log
       const dateStr = formatDateDDMMYY(new Date());
       const logChannel = await i.guild.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
 
       const embed = new EmbedBuilder()
         .setColor(PURPLE)
-        .setTitle("📌 Venda registrada (Robux)")
+        .setTitle("📌 Venda registrada")
         .addFields(
           { name: "Usuário", value: `<@${ownerId}>`, inline: true },
-          { name: "Robux", value: `${order.robux}`, inline: true },
           { name: "Total", value: brl(order.total), inline: true },
           { name: "Data", value: dateStr, inline: true },
           { name: "Modo", value: order.modo, inline: false },
-          { name: "Stock restante", value: `${formatStock(data.stock)} Robux`, inline: false },
+          { name: "Ticket", value: `${channel}`, inline: false },
           { name: "Staff", value: `<@${i.user.id}>`, inline: false },
         );
 
-      if (logChannel?.isTextBased()) await logChannel.send({ embeds: [embed] });
+      // desconta stock se for Robux (usa robuxNet)
+      if (order.type === "robux") {
+        embed.addFields(
+          { name: "Robux (líquido)", value: `${order.robuxNet}`, inline: true },
+          { name: "Robux para comprar", value: `${order.robuxGross}`, inline: true },
+        );
 
-      // cargo comprador
+        const state = readStockState();
+        const nextStock = Math.max(0, state.stock - order.robuxNet);
+
+        writeStockState({
+          stock: nextStock,
+          panelMessageId: state.panelMessageId,
+          panelChannelId: state.panelChannelId
+        });
+
+        await updatePanelIfExists().catch(() => null);
+      }
+
+      if (logChannel && logChannel.isTextBased()) {
+        await logChannel.send({ embeds: [embed] });
+      } else {
+        await channel.send({ content: "⚠️ Canal de logs inválido/sem permissão.", embeds: [embed] });
+      }
+
+      // Dá cargo comprador
+      let buyerAdded = false;
       try {
         const member = await i.guild.members.fetch(ownerId);
-        if (member && !member.roles.cache.has(BUYER_ROLE_ID)) await member.roles.add(BUYER_ROLE_ID, "Compra registrada (/logs)");
-      } catch {}
+        if (member && !member.roles.cache.has(BUYER_ROLE_ID)) {
+          await member.roles.add(BUYER_ROLE_ID, "Compra registrada via /logs");
+        }
+        buyerAdded = true;
+      } catch (err) {
+        console.error("ERRO ao adicionar cargo Comprador:", err);
+      }
 
-      await i.channel.send(`✅ Venda registrada. 📦 Stock agora: **${formatStock(data.stock)}**. 🔒 Fechando...`);
+      await channel.send(
+        `✅ Venda registrada por <@${i.user.id}>.\n` +
+        `🏷️ Cargo **Comprador** ${buyerAdded ? "aplicado" : "NÃO aplicado (verifique hierarquia/permissões)"} para <@${ownerId}>.\n` +
+        `🔒 Ticket será fechado em 5 segundos...`
+      );
+
       await i.editReply("✅ Log registrado. Fechando ticket...");
-      await finalizeTicket(i.channel, "Venda finalizada (/logs)");
+      await finalizeTicket(channel, "Venda finalizada via /logs");
       return;
     }
 
-    // /gamepass (finaliza gamepass)
-    if (i.isChatInputCommand() && i.commandName === "gamepass") {
-      if (!hasStaffRole(i.member)) return i.reply({ content: "❌ Só staff.", ephemeral: true });
-
-      const ownerId = parseTicketOwnerIdFromTopic(i.channel?.topic || "");
-      if (!ownerId) return i.reply({ content: "❌ Use dentro de um ticket.", ephemeral: true });
-
-      await i.deferReply({ ephemeral: true });
-
-      const order = await extractOrderFromTicket(i.channel);
-      if (!order || order.type !== "gamepass") return i.editReply("❌ Não achei pedido de GAMEPASS nesse ticket.");
-
-      // desconta stock
-      const data = readStockData();
-      data.stock = Math.max(0, data.stock - order.robux);
-      writeStockData(data);
-      await updatePanelMessage().catch(() => null);
-
-      // manda log
-      const dateStr = formatDateDDMMYY(new Date());
-      const logChannel = await i.guild.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
-
-      const embed = new EmbedBuilder()
-        .setColor(PURPLE)
-        .setTitle("📌 Venda registrada (Gamepass)")
-        .addFields(
-          { name: "Usuário", value: `<@${ownerId}>`, inline: true },
-          { name: "Robux", value: `${order.robux}`, inline: true },
-          { name: "Total", value: brl(order.total), inline: true },
-          { name: "Data", value: dateStr, inline: true },
-          { name: "Detalhes", value: order.modo, inline: false },
-          { name: "Stock restante", value: `${formatStock(data.stock)} Robux`, inline: false },
-          { name: "Staff", value: `<@${i.user.id}>`, inline: false },
-        );
-
-      if (logChannel?.isTextBased()) await logChannel.send({ embeds: [embed] });
-
-      // cargo comprador
-      try {
-        const member = await i.guild.members.fetch(ownerId);
-        if (member && !member.roles.cache.has(BUYER_ROLE_ID)) await member.roles.add(BUYER_ROLE_ID, "Compra registrada (/gamepass)");
-      } catch {}
-
-      await i.channel.send(`✅ Venda registrada. 📦 Stock agora: **${formatStock(data.stock)}**. 🔒 Fechando...`);
-      await i.editReply("✅ Venda registrada. Fechando ticket...");
-      await finalizeTicket(i.channel, "Venda finalizada (/gamepass)");
-      return;
-    }
-
-    // Botões painel
+    // ---------- Main panel buttons ----------
     if (i.isButton() && i.customId === "buy_robux") {
       const menu = new StringSelectMenuBuilder()
         .setCustomId("robux_mode")
         .setPlaceholder("Escolha o modo")
         .addOptions([
           { label: "Sem taxa", value: "no_tax" },
-          { label: "Com taxa (+30% no preço)", value: "with_tax" },
+          { label: "Com taxa (cobrir 30% Roblox)", value: "with_tax" },
         ]);
 
       return i.reply({
@@ -503,8 +574,8 @@ client.on("interactionCreate", async (i) => {
       });
     }
 
-    // Enviar Gamepass (agora só Nick + Link)
     if (i.isButton() && i.customId === "send_gamepass") {
+      // Agora: Nick + LINK (bot tenta ler nome+robux e calcula total)
       const modal = new ModalBuilder()
         .setCustomId("gamepass_modal")
         .setTitle("Enviar Gamepass (in-game)");
@@ -523,35 +594,51 @@ client.on("interactionCreate", async (i) => {
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(nick),
-        new ActionRowBuilder().addComponents(link)
+        new ActionRowBuilder().addComponents(link),
       );
 
       return i.showModal(modal);
     }
 
-    // Select Robux mode -> modal
+    // ---------- Robux mode select -> modal ----------
     if (i.isStringSelectMenu() && i.customId === "robux_mode") {
-      const mode = i.values[0];
-      const modal = new ModalBuilder().setCustomId(`robux_order:${mode}`).setTitle("Pedido de Robux");
+      const mode = i.values[0]; // no_tax | with_tax
 
-      const nick = new TextInputBuilder().setCustomId("nick").setLabel("Nick do Roblox").setStyle(TextInputStyle.Short).setRequired(true);
-      const robux = new TextInputBuilder().setCustomId("robux").setLabel("Quantidade de Robux").setStyle(TextInputStyle.Short).setRequired(true);
+      const modal = new ModalBuilder()
+        .setCustomId(`robux_order:${mode}`)
+        .setTitle("Pedido de Robux");
 
-      modal.addComponents(new ActionRowBuilder().addComponents(nick), new ActionRowBuilder().addComponents(robux));
+      const nick = new TextInputBuilder()
+        .setCustomId("nick")
+        .setLabel("Nick do Roblox")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const robux = new TextInputBuilder()
+        .setCustomId("robux")
+        .setLabel("Robux que você quer RECEBER (líquido)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(nick),
+        new ActionRowBuilder().addComponents(robux)
+      );
+
       return i.showModal(modal);
     }
 
-    // Calculadora
+    // ---------- Calculator panel buttons ----------
     if (i.isButton() && (i.customId === "calc_no_tax" || i.customId === "calc_with_tax")) {
       const withTax = i.customId === "calc_with_tax";
 
       const modal = new ModalBuilder()
         .setCustomId(`calc_modal:${withTax ? "with" : "no"}`)
-        .setTitle(withTax ? "Calculadora (Com taxa)" : "Calculadora (Sem taxa)");
+        .setTitle(withTax ? "Calculadora (Com taxa Roblox)" : "Calculadora (Sem taxa)");
 
       const robux = new TextInputBuilder()
         .setCustomId("robux")
-        .setLabel("Quantidade de Robux")
+        .setLabel("Robux (valor líquido desejado)")
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
 
@@ -559,7 +646,7 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(modal);
     }
 
-    // Submit Robux order -> ticket
+    // ---------- Submit: Robux order -> ticket ----------
     if (i.isModalSubmit() && i.customId.startsWith("robux_order:")) {
       await i.deferReply({ ephemeral: true });
 
@@ -567,12 +654,32 @@ client.on("interactionCreate", async (i) => {
       const withTax = mode === "with_tax";
 
       const nick = i.fields.getTextInputValue("nick").trim();
-      const robux = Number(i.fields.getTextInputValue("robux").replace(/[^\d]/g, ""));
+      const robuxRaw = i.fields.getTextInputValue("robux").trim();
+      const robuxNet = Number(robuxRaw.replace(/[^\d]/g, ""));
 
-      if (!Number.isFinite(robux) || robux <= 0) return i.editReply("❌ Quantidade inválida.");
+      if (!Number.isFinite(robuxNet) || robuxNet <= 0) {
+        return i.editReply("❌ Quantidade inválida.");
+      }
 
-      const total = round2(priceBRL(robux, withTax));
-      const { channel: ticket, openedAt } = await createTicketChannel(i.guild, i.user);
+      // ✅ Correção: no modo com taxa, calcula robux para comprar (gross)
+      const robuxGross = withTax ? requiredRobuxToCoverFee(robuxNet) : robuxNet;
+
+      // Total em R$ baseado no Robux que será comprado (gross)
+      const total = round2(priceBRLFromRobux(robuxGross));
+
+      let ticket, openedAt;
+      try {
+        const res = await createTicketChannel(i.guild, i.user);
+        ticket = res.channel;
+        openedAt = res.openedAt;
+      } catch (err) {
+        console.error("ERRO criando ticket:", err);
+        return i.editReply(
+          "❌ Não consegui criar o canal do ticket.\n" +
+          "Verifique se o bot tem **Gerenciar canais** e acesso à categoria.\n" +
+          `Erro: \`${err?.message || "desconhecido"}\``
+        );
+      }
 
       const embed = new EmbedBuilder()
         .setColor(PURPLE)
@@ -581,47 +688,66 @@ client.on("interactionCreate", async (i) => {
           [
             `**Cliente:** <@${i.user.id}>`,
             `**Nick:** ${nick}`,
-            `**Robux:** ${robux}`,
-            `**Modo:** ${withTax ? "Com taxa (+30% no preço)" : "Sem taxa"}`,
+            `**Robux (líquido):** ${robuxNet}`,
+            `**Modo:** ${withTax ? "Com taxa (cobrir 30% Roblox)" : "Sem taxa"}`,
+            `**Robux para comprar:** ${robuxGross}`,
             `**Total:** ${brl(total)}`,
             "",
             "📌 **Instruções:**",
-            `1) Crie uma **Gamepass de ${robux} Robux**`,
+            `1) Crie uma **Gamepass de ${robuxGross} Robux**`,
             "2) Envie o link aqui no ticket",
             "",
-            "⏳ Fecha em **24h** automaticamente.",
-            "✅ Staff finaliza com **/logs**.",
+            "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "",
+            "✅ Quando finalizar a venda, o staff usa **/logs** para registrar, dar cargo e fechar.",
           ].join("\n")
         );
 
-      await ticket.send({ content: `<@&${STAFF_ROLE_ID}> Novo pedido!`, embeds: [embed], components: [buildTicketButtons()] });
-      await scheduleAutoClose(ticket, openedAt);
+      await ticket.send({
+        content: `<@&${STAFF_ROLE_ID}> Novo pedido!`,
+        embeds: [embed],
+        components: [buildTicketButtons()],
+      });
 
+      await scheduleAutoClose(ticket, openedAt);
       return i.editReply(`✅ Ticket criado: ${ticket}`);
     }
 
-    // Submit Gamepass modal -> ticket (lê link, pega nome+robux)
+    // ---------- Submit: Gamepass in-game -> ticket (lê link e calcula) ----------
     if (i.isModalSubmit() && i.customId === "gamepass_modal") {
       await i.deferReply({ ephemeral: true });
 
       const nick = i.fields.getTextInputValue("nick").trim();
       const gplink = i.fields.getTextInputValue("gplink").trim();
 
-      const id = extractGamePassId(gplink);
-      if (!id) return i.editReply("❌ Link/ID inválido.");
+      const gpId = extractGamepassId(gplink);
+      if (!gpId) {
+        return i.editReply("❌ Link inválido. Envie um link Roblox no formato **/game-pass/ID/**");
+      }
 
-      let info;
-      try {
-        info = await fetchGamePassInfo(id);
-      } catch (e) {
-        console.error(e);
+      const info = await fetchGamepassInfo(gpId);
+      if (!info) {
+        // tentativa falhou (Roblox bloqueou, caiu, etc.)
         return i.editReply("❌ Não consegui ler essa Gamepass agora. Tente novamente.");
       }
 
-      // Gamepass sem taxa (como você pediu)
-      const total = round2(priceBRL(info.robux, false));
+      const gpName = info.name;
+      const gpRobux = info.price;
+      const total = round2(priceBRLFromRobux(gpRobux));
 
-      const { channel: ticket, openedAt } = await createTicketChannel(i.guild, i.user);
+      let ticket, openedAt;
+      try {
+        const res = await createTicketChannel(i.guild, i.user);
+        ticket = res.channel;
+        openedAt = res.openedAt;
+      } catch (err) {
+        console.error("ERRO criando ticket:", err);
+        return i.editReply(
+          "❌ Não consegui criar o canal do ticket.\n" +
+          "Verifique se o bot tem **Gerenciar canais** e acesso à categoria.\n" +
+          `Erro: \`${err?.message || "desconhecido"}\``
+        );
+      }
 
       const embed = new EmbedBuilder()
         .setColor(PURPLE)
@@ -630,56 +756,71 @@ client.on("interactionCreate", async (i) => {
           [
             `**Cliente:** <@${i.user.id}>`,
             `**Nick:** ${nick}`,
-            `**Gamepass:** ${info.name}`,
-            `**Robux:** ${info.robux}`,
-            `**Link:** ${gplink}`,
+            `**Gamepass:** ${gpName}`,
+            `**Robux:** ${gpRobux}`,
             `**Total:** ${brl(total)}`,
+            `**Link:** ${gplink}`,
             "",
-            "⏳ Fecha em **24h** automaticamente.",
-            "✅ Staff finaliza com **/gamepass**.",
+            "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "",
+            "✅ Quando finalizar a venda, o staff pode usar **/logs** (registra e fecha).",
           ].join("\n")
         );
 
-      await ticket.send({ content: `<@&${STAFF_ROLE_ID}> Novo pedido (Gamepass)!`, embeds: [embed], components: [buildTicketButtons()] });
-      await scheduleAutoClose(ticket, openedAt);
+      await ticket.send({
+        content: `<@&${STAFF_ROLE_ID}> Novo pedido (Gamepass)!`,
+        embeds: [embed],
+        components: [buildTicketButtons()],
+      });
 
+      await scheduleAutoClose(ticket, openedAt);
       return i.editReply(`✅ Ticket criado: ${ticket}`);
     }
 
-    // Submit calculator
+    // ---------- Submit: Calculator ----------
     if (i.isModalSubmit() && i.customId.startsWith("calc_modal:")) {
-      const withTax = i.customId.endsWith(":with");
-      const robux = Number(i.fields.getTextInputValue("robux").replace(/[^\d]/g, ""));
-      if (!robux || robux <= 0) return i.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
+      const mode = i.customId.split(":")[1]; // with | no
+      const withTax = mode === "with";
 
-      const total = round2(priceBRL(robux, withTax));
-      const other = round2(priceBRL(robux, !withTax));
+      const robuxRaw = i.fields.getTextInputValue("robux").trim();
+      const robuxNet = Number(robuxRaw.replace(/[^\d]/g, ""));
 
+      if (!Number.isFinite(robuxNet) || robuxNet <= 0) {
+        return i.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
+      }
+
+      const robuxGross = withTax ? requiredRobuxToCoverFee(robuxNet) : robuxNet;
+      const total = round2(priceBRLFromRobux(robuxGross));
+
+      // ✅ Agora manda SÓ um valor (não os dois juntos)
       const embed = new EmbedBuilder()
         .setColor(PURPLE)
         .setTitle("🧮 Resultado da calculadora")
         .setDescription(
           [
-            `**Robux:** ${robux}`,
-            "",
-            `**Sem taxa:** ${brl(withTax ? other : total)}`,
-            `**Com taxa (+30%):** ${brl(withTax ? total : other)}`,
-          ].join("\n")
+            `**Robux (líquido desejado):** ${robuxNet}`,
+            withTax ? `**Robux para comprar (c/ taxa 30%):** ${robuxGross}` : null,
+            `**Total:** ${brl(total)}`,
+          ].filter(Boolean).join("\n")
         );
 
       return i.reply({ embeds: [embed], ephemeral: true });
     }
 
-    // Close ticket
+    // ---------- Close ticket button ----------
     if (i.isButton() && i.customId === "close_ticket") {
-      const ownerId = parseTicketOwnerIdFromTopic(i.channel?.topic || "");
+      const channel = i.channel;
+      const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
+
       const isOwner = ownerId && i.user.id === ownerId;
       const isStaff = hasStaffRole(i.member);
 
-      if (!isOwner && !isStaff) return i.reply({ content: "❌ Você não pode fechar este ticket.", ephemeral: true });
+      if (!isOwner && !isStaff) {
+        return i.reply({ content: "❌ Você não pode fechar este ticket.", ephemeral: true });
+      }
 
       await i.reply({ content: "🔒 Fechando ticket em 5 segundos...", ephemeral: true });
-      await finalizeTicket(i.channel, "Ticket fechado manualmente");
+      await finalizeTicket(channel, "Ticket fechado manualmente");
       return;
     }
 
