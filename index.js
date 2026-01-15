@@ -76,7 +76,7 @@ async function sendPanel(channel) {
 client.on("interactionCreate", async (i) => {
   try {
     // /painel
-    if (i.isChatInputCommand() && i.commandName === "painel") {
+    if (i.isChatInputCommand() && i.commandName === "cmd") {
       await sendPanel(i.channel);
       return i.reply({ content: "✅ Painel enviado.", ephemeral: true });
     }
