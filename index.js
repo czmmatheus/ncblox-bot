@@ -1,3 +1,17 @@
+// ======================================================
+// ✅ BASE OFICIAL: NCBlox (Robux + Tickets + /cmd + /2cmd + /logs + /gamepass)
+// Regras: qualquer alteração futura será aplicada AQUI,
+// sem misturar outros scripts.
+// ======================================================
+
+// ================== ANTI-CRASH ==================
+process.on("unhandledRejection", (reason) => {
+  console.error("🔥 unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("🔥 uncaughtException:", err);
+});
+
 const {
   Client, GatewayIntentBits,
   REST, Routes,
@@ -12,15 +26,12 @@ const {
   PermissionsBitField,
 } = require("discord.js");
 
-const axios = require("axios");
-const cheerio = require("cheerio");
-
 // ================== CONFIG / ENV ==================
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;            // cargo staff
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "1461273267225497754";
@@ -32,8 +43,8 @@ const PURPLE = 0x7c3aed;
 
 const AUTO_CLOSE_MS = 24 * 60 * 60 * 1000; // 24h
 
-// Banner que você mandou
-const BANNER_URL = "https://cdn.discordapp.com/attachments/1428217284660564125/1461373724535029893/file_000000007a1471f6bb88daa791749f60.png?ex=696a51d6&is=69690056&hm=d85d13d5a32d0c1df315724e18a5d0d6817ae91ccf4a9e27a35c27a41c966400&";
+const BANNER_URL =
+  "https://cdn.discordapp.com/attachments/1428217284660564125/1461373724535029893/file_000000007a1471f6bb88daa791749f60.png?ex=696a51d6&is=69690056&hm=d85d13d5a32d0c1df315724e18a5d0d6817ae91ccf4a9e27a35c27a41c966400&";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("Faltam variáveis: BOT_TOKEN, CLIENT_ID, GUILD_ID");
@@ -56,7 +67,7 @@ function priceBRL(robux, withTax) {
   return withTax ? base * PRICE_MULT : base;
 }
 function priceGamepassBRL(robux) {
-  return (robux / 1000) * RATE_PER_1000; // A: 1000 = R$28
+  return (robux / 1000) * RATE_PER_1000; // 1000 = R$28
 }
 function formatDateDDMMYY(date = new Date()) {
   const dd = String(date.getDate()).padStart(2, "0");
@@ -71,31 +82,13 @@ function parseTicketOwnerIdFromTopic(topic = "") {
   const m = topic.match(/ticketOwner:(\d+)/);
   return m?.[1] || null;
 }
-
-// ================== SCRAPER (opcional: nome/preço do link) ==================
-async function fetchGamepassInfo(url) {
-  const { data } = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-  const $ = cheerio.load(data);
-
-  const name =
-    $('h1[itemprop="name"]').text().trim() ||
-    $('meta[property="og:title"]').attr("content") ||
-    "Gamepass";
-
-  let priceTxt =
-    $('[data-testid="price-label"]').first().text() ||
-    $('[class*="price"]').first().text() ||
-    "";
-
-  const robux = Number(priceTxt.replace(/[^\d]/g, ""));
-  if (!robux || robux <= 0) throw new Error("Não foi possível ler o preço em Robux.");
-
-  return { name, robux };
+function safeNumberFromText(text) {
+  const n = Number(String(text || "").replace(/[^\d]/g, ""));
+  return Number.isFinite(n) ? n : NaN;
 }
 
-// ================== TIMERS (auto-close) ==================
+// ================== TICKET TIMERS ==================
 const ticketTimers = new Map(); // channelId -> timeout
-
 function cancelTicketTimer(channelId) {
   if (ticketTimers.has(channelId)) {
     clearTimeout(ticketTimers.get(channelId));
@@ -108,8 +101,8 @@ async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("cmd").setDescription("Painel principal (vendas)"),
     new SlashCommandBuilder().setName("2cmd").setDescription("Painel da calculadora (sem tickets)"),
-    new SlashCommandBuilder().setName("logs").setDescription("Registra a venda do ticket (auto), dá cargo e fecha"),
-    new SlashCommandBuilder().setName("gamepass").setDescription("Registra venda de Gamepass (auto), dá cargo e fecha"),
+    new SlashCommandBuilder().setName("logs").setDescription("Staff: registra venda Robux, dá cargo e fecha"),
+    new SlashCommandBuilder().setName("gamepass").setDescription("Staff: registra venda Gamepass, dá cargo e fecha"),
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -118,7 +111,14 @@ async function registerCommands() {
 }
 
 // ================== BOT ==================
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,   // necessário p/ roles.add e members.fetch
+    GatewayIntentBits.GuildMessages,  // p/ fetch de mensagens do ticket
+  ],
+});
+
 client.once("ready", () => console.log(`✅ Logado como ${client.user.tag}`));
 
 // ================== PANELS ==================
@@ -139,14 +139,8 @@ async function sendMainPanel(channel) {
     .setImage(BANNER_URL);
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("buy_robux")
-      .setLabel("Comprar Robux")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId("send_gamepass")
-      .setLabel("Gamepass")
-      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("buy_robux").setLabel("Comprar Robux").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("buy_gamepass").setLabel("Gamepass").setStyle(ButtonStyle.Secondary),
   );
 
   await channel.send({ embeds: [embed], components: [row] });
@@ -169,14 +163,8 @@ async function sendCalcPanel(channel) {
     .setImage(BANNER_URL);
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("calc_no_tax")
-      .setLabel("Calcular (Sem taxa)")
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId("calc_with_tax")
-      .setLabel("Calcular (Com taxa)")
-      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("calc_no_tax").setLabel("Calcular (Sem taxa)").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("calc_with_tax").setLabel("Calcular (Com taxa)").setStyle(ButtonStyle.Primary),
   );
 
   await channel.send({ embeds: [embed], components: [row] });
@@ -193,31 +181,9 @@ async function createTicketChannel(guild, user) {
 
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-    {
-      id: user.id,
-      allow: [
-        PermissionsBitField.Flags.ViewChannel,
-        PermissionsBitField.Flags.SendMessages,
-        PermissionsBitField.Flags.ReadMessageHistory,
-      ],
-    },
-    {
-      id: STAFF_ROLE_ID,
-      allow: [
-        PermissionsBitField.Flags.ViewChannel,
-        PermissionsBitField.Flags.SendMessages,
-        PermissionsBitField.Flags.ReadMessageHistory,
-      ],
-    },
-    {
-      id: client.user.id,
-      allow: [
-        PermissionsBitField.Flags.ViewChannel,
-        PermissionsBitField.Flags.SendMessages,
-        PermissionsBitField.Flags.ManageChannels,
-        PermissionsBitField.Flags.ReadMessageHistory,
-      ],
-    },
+    { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+    { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+    { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] },
   ];
 
   const openedAt = Date.now();
@@ -253,10 +219,7 @@ async function scheduleAutoClose(channel, openedAt) {
 
 function buildTicketButtons() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("close_ticket")
-      .setLabel("Fechar ticket")
-      .setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId("close_ticket").setLabel("Fechar ticket").setStyle(ButtonStyle.Danger)
   );
 }
 
@@ -267,9 +230,15 @@ async function finalizeTicket(channel, reason = "Finalizado") {
   }, 5000);
 }
 
-// ================== ORDER EXTRACTION ==================
+// ================== ORDER EXTRACTION FROM TICKET ==================
 async function extractOrderFromTicket(channel) {
-  const msgs = await channel.messages.fetch({ limit: 50 });
+  let msgs;
+  try {
+    msgs = await channel.messages.fetch({ limit: 50 });
+  } catch (e) {
+    console.error("fetch messages failed:", e?.message || e);
+    return null;
+  }
 
   for (const [, msg] of msgs) {
     if (!msg.author || msg.author.id !== client.user.id) continue;
@@ -300,7 +269,7 @@ async function extractOrderFromTicket(channel) {
       }
     }
 
-    // Gamepass (novo)
+    // Gamepass
     if (title.includes("pedido") && title.includes("gamepass")) {
       const nickMatch = desc.match(/\*\*Nick:\*\*\s*(.+)/i);
       const linkMatch = desc.match(/\*\*Link:\*\*\s*(.+)/i);
@@ -329,35 +298,30 @@ async function extractOrderFromTicket(channel) {
 // ================== INTERACTIONS ==================
 client.on("interactionCreate", async (i) => {
   try {
-    // ---------- Slash commands ----------
+    // Slash: /cmd
     if (i.isChatInputCommand() && i.commandName === "cmd") {
       await sendMainPanel(i.channel);
       return i.reply({ content: "✅ Painel enviado.", ephemeral: true });
     }
 
+    // Slash: /2cmd
     if (i.isChatInputCommand() && i.commandName === "2cmd") {
       await sendCalcPanel(i.channel);
       return i.reply({ content: "✅ Painel da calculadora enviado.", ephemeral: true });
     }
 
-    // ---------- /logs (Robux) ----------
+    // Slash: /logs (Robux)
     if (i.isChatInputCommand() && i.commandName === "logs") {
-      if (!hasStaffRole(i.member)) {
-        return i.reply({ content: "❌ Você não tem permissão para usar /logs.", ephemeral: true });
-      }
+      if (!hasStaffRole(i.member)) return i.reply({ content: "❌ Sem permissão.", ephemeral: true });
 
       const channel = i.channel;
       const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
-      if (!ownerId) {
-        return i.reply({ content: "❌ Use /logs dentro de um ticket criado pelo bot.", ephemeral: true });
-      }
+      if (!ownerId) return i.reply({ content: "❌ Use /logs dentro de um ticket do bot.", ephemeral: true });
 
       await i.deferReply({ ephemeral: true });
 
       const order = await extractOrderFromTicket(channel);
-      if (!order || order.type !== "robux") {
-        return i.editReply("❌ Não achei o pedido de Robux nesse ticket.");
-      }
+      if (!order || order.type !== "robux") return i.editReply("❌ Não achei o pedido de Robux nesse ticket.");
 
       const dateStr = formatDateDDMMYY(new Date());
       const logChannel = await i.guild.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
@@ -367,58 +331,46 @@ client.on("interactionCreate", async (i) => {
         .setTitle("📌 Venda registrada (Robux)")
         .addFields(
           { name: "Usuário", value: `<@${ownerId}>`, inline: true },
+          { name: "Robux", value: `${order.robux}`, inline: true },
           { name: "Total", value: brl(order.total), inline: true },
           { name: "Data", value: dateStr, inline: true },
           { name: "Modo", value: order.modo, inline: false },
           { name: "Ticket", value: `${channel}`, inline: false },
           { name: "Staff", value: `<@${i.user.id}>`, inline: false },
-          { name: "Robux", value: `${order.robux}`, inline: true },
         );
 
       if (logChannel && logChannel.isTextBased()) {
-        await logChannel.send({ embeds: [embed] });
-      } else {
-        await channel.send({ content: "⚠️ Canal de logs inválido/sem permissão.", embeds: [embed] });
+        await logChannel.send({ embeds: [embed] }).catch(() => {});
       }
 
+      // cargo comprador
       try {
         const member = await i.guild.members.fetch(ownerId);
         if (member && !member.roles.cache.has(BUYER_ROLE_ID)) {
-          await member.roles.add(BUYER_ROLE_ID, "Compra registrada via /logs");
+          await member.roles.add(BUYER_ROLE_ID, "Compra via /logs");
         }
-      } catch {}
+      } catch (e) {
+        console.error("roles.add failed:", e?.message || e);
+      }
 
-      await channel.send(`✅ Venda registrada por <@${i.user.id}>. 🏷️ Cargo aplicado. 🔒 Fechando em 5s...`);
-      await i.editReply("✅ Log registrado. Fechando ticket...");
+      await channel.send("✅ Log feito. 🔒 Fechando em 5s...").catch(() => {});
+      await i.editReply("✅ Registrado. Fechando...");
       await finalizeTicket(channel, "Venda finalizada via /logs");
       return;
     }
 
-    // ---------- /gamepass (Gamepass) ----------
+    // Slash: /gamepass
     if (i.isChatInputCommand() && i.commandName === "gamepass") {
-      if (!hasStaffRole(i.member)) {
-        return i.reply({ content: "❌ Você não tem permissão para usar /gamepass.", ephemeral: true });
-      }
+      if (!hasStaffRole(i.member)) return i.reply({ content: "❌ Sem permissão.", ephemeral: true });
 
       const channel = i.channel;
       const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
-      if (!ownerId) {
-        return i.reply({ content: "❌ Use /gamepass dentro de um ticket criado pelo bot.", ephemeral: true });
-      }
+      if (!ownerId) return i.reply({ content: "❌ Use /gamepass dentro de um ticket do bot.", ephemeral: true });
 
       await i.deferReply({ ephemeral: true });
 
       const order = await extractOrderFromTicket(channel);
-      if (!order || order.type !== "gamepass") {
-        return i.editReply("❌ Não achei o pedido de Gamepass nesse ticket.");
-      }
-
-      // tenta pegar nome real pelo link (opcional)
-      let gpName = "Gamepass";
-      try {
-        const info = await fetchGamepassInfo(order.link);
-        gpName = info?.name || gpName;
-      } catch {}
+      if (!order || order.type !== "gamepass") return i.editReply("❌ Não achei o pedido de Gamepass nesse ticket.");
 
       const dateStr = formatDateDDMMYY(new Date());
       const logChannel = await i.guild.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
@@ -429,7 +381,6 @@ client.on("interactionCreate", async (i) => {
         .addFields(
           { name: "Usuário", value: `<@${ownerId}>`, inline: true },
           { name: "Nick", value: order.nick, inline: true },
-          { name: "Gamepass", value: gpName, inline: false },
           { name: "Robux", value: `${order.robux}`, inline: true },
           { name: "Total", value: brl(order.total), inline: true },
           { name: "Data", value: dateStr, inline: true },
@@ -439,25 +390,26 @@ client.on("interactionCreate", async (i) => {
         );
 
       if (logChannel && logChannel.isTextBased()) {
-        await logChannel.send({ embeds: [embed] });
-      } else {
-        await channel.send({ content: "⚠️ Canal de logs inválido/sem permissão.", embeds: [embed] });
+        await logChannel.send({ embeds: [embed] }).catch(() => {});
       }
 
+      // cargo comprador
       try {
         const member = await i.guild.members.fetch(ownerId);
         if (member && !member.roles.cache.has(BUYER_ROLE_ID)) {
-          await member.roles.add(BUYER_ROLE_ID, "Compra registrada via /gamepass");
+          await member.roles.add(BUYER_ROLE_ID, "Compra via /gamepass");
         }
-      } catch {}
+      } catch (e) {
+        console.error("roles.add failed:", e?.message || e);
+      }
 
-      await channel.send(`✅ Gamepass registrada por <@${i.user.id}>. 🏷️ Cargo aplicado. 🔒 Fechando em 5s...`);
-      await i.editReply("✅ Log registrado. Fechando ticket...");
+      await channel.send("✅ Gamepass registrada. 🔒 Fechando em 5s...").catch(() => {});
+      await i.editReply("✅ Registrado. Fechando...");
       await finalizeTicket(channel, "Venda finalizada via /gamepass");
       return;
     }
 
-    // ---------- Main panel buttons ----------
+    // Botão: Comprar Robux
     if (i.isButton() && i.customId === "buy_robux") {
       const menu = new StringSelectMenuBuilder()
         .setCustomId("robux_mode")
@@ -474,29 +426,13 @@ client.on("interactionCreate", async (i) => {
       });
     }
 
-    // --- NOVO Gamepass: Nick + Link + Robux ---
-    if (i.isButton() && i.customId === "send_gamepass") {
-      const modal = new ModalBuilder()
-        .setCustomId("gamepass_modal")
-        .setTitle("Pedido de Gamepass");
+    // Botão: Gamepass
+    if (i.isButton() && i.customId === "buy_gamepass") {
+      const modal = new ModalBuilder().setCustomId("gamepass_modal").setTitle("Pedido de Gamepass");
 
-      const nick = new TextInputBuilder()
-        .setCustomId("nick")
-        .setLabel("Nick do Roblox")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const link = new TextInputBuilder()
-        .setCustomId("gplink")
-        .setLabel("Link da Gamepass")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const robux = new TextInputBuilder()
-        .setCustomId("robux")
-        .setLabel("Quantidade de Robux")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
+      const nick = new TextInputBuilder().setCustomId("nick").setLabel("Nick do Roblox").setStyle(TextInputStyle.Short).setRequired(true);
+      const link = new TextInputBuilder().setCustomId("gplink").setLabel("Link da Gamepass").setStyle(TextInputStyle.Short).setRequired(true);
+      const robux = new TextInputBuilder().setCustomId("robux").setLabel("Quantidade de Robux").setStyle(TextInputStyle.Short).setRequired(true);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(nick),
@@ -507,35 +443,22 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(modal);
     }
 
-    // ---------- Robux mode select -> modal ----------
+    // Select: modo Robux -> modal
     if (i.isStringSelectMenu() && i.customId === "robux_mode") {
       const mode = i.values[0];
+      const modal = new ModalBuilder().setCustomId(`robux_order:${mode}`).setTitle("Pedido de Robux");
 
-      const modal = new ModalBuilder()
-        .setCustomId(`robux_order:${mode}`)
-        .setTitle("Pedido de Robux");
-
-      const nick = new TextInputBuilder()
-        .setCustomId("nick")
-        .setLabel("Nick do Roblox")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const robux = new TextInputBuilder()
-        .setCustomId("robux")
-        .setLabel("Quantidade de Robux")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
+      const nick = new TextInputBuilder().setCustomId("nick").setLabel("Nick do Roblox").setStyle(TextInputStyle.Short).setRequired(true);
+      const robux = new TextInputBuilder().setCustomId("robux").setLabel("Quantidade de Robux").setStyle(TextInputStyle.Short).setRequired(true);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(nick),
         new ActionRowBuilder().addComponents(robux)
       );
-
       return i.showModal(modal);
     }
 
-    // ---------- Calculator panel buttons ----------
+    // Botões calculadora
     if (i.isButton() && (i.customId === "calc_no_tax" || i.customId === "calc_with_tax")) {
       const withTax = i.customId === "calc_with_tax";
 
@@ -553,7 +476,7 @@ client.on("interactionCreate", async (i) => {
       return i.showModal(modal);
     }
 
-    // ---------- Submit: Robux order -> ticket ----------
+    // Submit: Robux -> ticket
     if (i.isModalSubmit() && i.customId.startsWith("robux_order:")) {
       await i.deferReply({ ephemeral: true });
 
@@ -561,22 +484,18 @@ client.on("interactionCreate", async (i) => {
       const withTax = mode === "with_tax";
 
       const nick = i.fields.getTextInputValue("nick").trim();
-      const robuxRaw = i.fields.getTextInputValue("robux").trim();
-      const robux = Number(robuxRaw.replace(/[^\d]/g, ""));
-
-      if (!Number.isFinite(robux) || robux <= 0) {
-        return i.editReply("❌ Quantidade inválida.");
-      }
+      const robux = safeNumberFromText(i.fields.getTextInputValue("robux"));
+      if (!Number.isFinite(robux) || robux <= 0) return i.editReply("❌ Quantidade inválida.");
 
       const total = round2(priceBRL(robux, withTax));
 
       let ticket, openedAt;
       try {
         const res = await createTicketChannel(i.guild, i.user);
-        ticket = res.channel;
-        openedAt = res.openedAt;
-      } catch (err) {
-        return i.editReply("❌ Não consegui criar o canal do ticket.");
+        ticket = res.channel; openedAt = res.openedAt;
+      } catch (e) {
+        console.error("create ticket failed:", e?.message || e);
+        return i.editReply("❌ Não consegui criar o ticket. Verifique permissões/categoria.");
       }
 
       const embed = new EmbedBuilder()
@@ -590,7 +509,8 @@ client.on("interactionCreate", async (i) => {
             `**Modo:** ${withTax ? "Com taxa (+30% no preço)" : "Sem taxa"}`,
             `**Total:** ${brl(total)}`,
             "",
-            "✅ Staff usa **/logs** para registrar e fechar.",
+            "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "✅ Quando finalizar, o staff usa **/logs**.",
           ].join("\n")
         );
 
@@ -598,34 +518,31 @@ client.on("interactionCreate", async (i) => {
         content: `<@&${STAFF_ROLE_ID}> Novo pedido!`,
         embeds: [embed],
         components: [buildTicketButtons()],
-      });
+      }).catch(()=>{});
 
       await scheduleAutoClose(ticket, openedAt);
       return i.editReply(`✅ Ticket criado: ${ticket}`);
     }
 
-    // ---------- Submit: Gamepass -> ticket ----------
+    // Submit: Gamepass -> ticket
     if (i.isModalSubmit() && i.customId === "gamepass_modal") {
       await i.deferReply({ ephemeral: true });
 
       const nick = i.fields.getTextInputValue("nick").trim();
       const link = i.fields.getTextInputValue("gplink").trim();
-      const robuxRaw = i.fields.getTextInputValue("robux").trim();
-      const robux = Number(robuxRaw.replace(/[^\d]/g, ""));
+      const robux = safeNumberFromText(i.fields.getTextInputValue("robux"));
 
-      if (!Number.isFinite(robux) || robux <= 0) {
-        return i.editReply("❌ Robux inválido.");
-      }
+      if (!Number.isFinite(robux) || robux <= 0) return i.editReply("❌ Robux inválido.");
 
       const total = round2(priceGamepassBRL(robux));
 
       let ticket, openedAt;
       try {
         const res = await createTicketChannel(i.guild, i.user);
-        ticket = res.channel;
-        openedAt = res.openedAt;
-      } catch (err) {
-        return i.editReply("❌ Não consegui criar o canal do ticket.");
+        ticket = res.channel; openedAt = res.openedAt;
+      } catch (e) {
+        console.error("create ticket failed:", e?.message || e);
+        return i.editReply("❌ Não consegui criar o ticket. Verifique permissões/categoria.");
       }
 
       const embed = new EmbedBuilder()
@@ -639,7 +556,8 @@ client.on("interactionCreate", async (i) => {
             `**Robux:** ${robux}`,
             `**Total:** ${brl(total)}`,
             "",
-            "✅ Staff usa **/gamepass** para registrar e fechar.",
+            "⏳ **Aguarde até 1 dia (24h)**. Após esse tempo o ticket será fechado automaticamente.",
+            "✅ Quando finalizar, o staff usa **/gamepass**.",
           ].join("\n")
         );
 
@@ -647,23 +565,19 @@ client.on("interactionCreate", async (i) => {
         content: `<@&${STAFF_ROLE_ID}> Novo pedido (Gamepass)!`,
         embeds: [embed],
         components: [buildTicketButtons()],
-      });
+      }).catch(()=>{});
 
       await scheduleAutoClose(ticket, openedAt);
       return i.editReply(`✅ Ticket criado: ${ticket}`);
     }
 
-    // ---------- Submit: Calculator ----------
+    // Submit: calculadora
     if (i.isModalSubmit() && i.customId.startsWith("calc_modal:")) {
       const mode = i.customId.split(":")[1];
       const withTax = mode === "with";
 
-      const robuxRaw = i.fields.getTextInputValue("robux").trim();
-      const robux = Number(robuxRaw.replace(/[^\d]/g, ""));
-
-      if (!Number.isFinite(robux) || robux <= 0) {
-        return i.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
-      }
+      const robux = safeNumberFromText(i.fields.getTextInputValue("robux"));
+      if (!Number.isFinite(robux) || robux <= 0) return i.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
 
       const total = round2(priceBRL(robux, withTax));
       const other = round2(priceBRL(robux, !withTax));
@@ -684,7 +598,7 @@ client.on("interactionCreate", async (i) => {
       return i.reply({ embeds: [embed], ephemeral: true });
     }
 
-    // ---------- Close ticket button ----------
+    // Botão fechar ticket
     if (i.isButton() && i.customId === "close_ticket") {
       const channel = i.channel;
       const ownerId = parseTicketOwnerIdFromTopic(channel?.topic || "");
@@ -692,17 +606,15 @@ client.on("interactionCreate", async (i) => {
       const isOwner = ownerId && i.user.id === ownerId;
       const isStaff = hasStaffRole(i.member);
 
-      if (!isOwner && !isStaff) {
-        return i.reply({ content: "❌ Você não pode fechar este ticket.", ephemeral: true });
-      }
+      if (!isOwner && !isStaff) return i.reply({ content: "❌ Você não pode fechar este ticket.", ephemeral: true });
 
-      await i.reply({ content: "🔒 Fechando ticket em 5 segundos...", ephemeral: true });
+      await i.reply({ content: "🔒 Fechando ticket em 5 segundos...", ephemeral: true }).catch(()=>{});
       await finalizeTicket(channel, "Ticket fechado manualmente");
       return;
     }
 
   } catch (e) {
-    console.error(e);
+    console.error("interactionCreate error:", e);
     if (i.isRepliable()) {
       try { await i.reply({ content: "❌ Erro. Veja os logs do Railway.", ephemeral: true }); } catch {}
     }
@@ -711,6 +623,10 @@ client.on("interactionCreate", async (i) => {
 
 // ================== START ==================
 (async () => {
-  await registerCommands();
-  await client.login(TOKEN);
+  try {
+    await registerCommands();
+    await client.login(TOKEN);
+  } catch (e) {
+    console.error("START FAILED:", e);
+  }
 })();
