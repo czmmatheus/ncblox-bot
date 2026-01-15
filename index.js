@@ -1,4 +1,28 @@
+/**
+ * Discord.js v14 — Painel + Calculadora Robux (taxa Roblox 30% => você recebe 70%)
+ *
+ * Regras:
+ * - Base: 1000 Robux = R$ 28,00
+ * - Sem taxa: cliente cria gamepass = X (você recebe 0.7X)
+ * - Cobrir taxa: cliente quer X líquido => gamepass = ceil(X / 0.7)
+ * - Valor em R$: (gamepassRobux / 1000) * 28
+ *
+ * Como usar:
+ * 1) npm i discord.js
+ * 2) node index.js
+ * 3) /painel no canal onde quer o painel
+ *
+ * Ajuste:
+ * - TOKEN, CLIENT_ID, GUILD_ID
+ * - (Opcional) IMAGEM do embed
+ */
+
 const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -9,40 +33,80 @@ const {
   TextInputStyle,
 } = require("discord.js");
 
-// CONFIG
-const RATE_PER_1000 = 30; // R$ 30 por 1000 robux
-const TAX_MULTIPLIER = 1.3; // "com taxa" = +30% => 39 por 1000
-const PURPLE = 0x7c3aed;
+// ===== CONFIG =====
+const TOKEN = process.env.BOT_TOKEN || "COLOQUE_SEU_TOKEN_AQUI";
+const CLIENT_ID = process.env.CLIENT_ID || "COLOQUE_SEU_CLIENT_ID_AQUI";
+const GUILD_ID = process.env.GUILD_ID || "COLOQUE_SEU_GUILD_ID_AQUI";
 
+const RATE_PER_1000 = 28; // R$ por 1000 Robux
+const ROBLOX_NET = 0.7; // você recebe 70%
+const PURPLE = 0x7c3aed;
+const PANEL_IMAGE_URL = "https://example.com/banner.png"; // troque ou deixe vazio
+
+// ===== HELPERS =====
+function ceilInt(n) {
+  return Math.ceil(n);
+}
 function brl(n) {
   return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
-
-function calcPriceBRL(robux, coverTax) {
-  const base = (robux / 1000) * RATE_PER_1000;
-  return coverTax ? base * TAX_MULTIPLIER : base;
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+function priceFromRobux(robux) {
+  return (robux / 1000) * RATE_PER_1000;
+}
+function gpToNetTarget(netRobuxWanted) {
+  return ceilInt(netRobuxWanted / ROBLOX_NET);
+}
+function netFromGp(gpRobux) {
+  return Math.floor(gpRobux * ROBLOX_NET);
 }
 
-// (Opcional) cálculo do gamepass pra cobrir taxa real 30% do Roblox:
-function gamepassPriceToNet(robuxDesired) {
-  return Math.ceil(robuxDesired / 0.7);
+// ===== SLASH COMMAND REGISTER =====
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("painel")
+      .setDescription("Envia o painel de compra/calculadora de Robux")
+      .toJSON(),
+  ];
+
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+    body: commands,
+  });
+  console.log("✅ Comandos registrados.");
 }
 
-// 1) ENVIAR O PAINEL (ex.: comando /painel)
+// ===== BOT =====
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+client.once("ready", () => {
+  console.log(`✅ Logado como ${client.user.tag}`);
+});
+
+// ===== SEND PANEL =====
 async function sendPanel(channel) {
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
-    .setTitle("Central de pedidos - New Store")
+    .setTitle("Central de pedidos - Robux")
     .setDescription(
       [
-        "**Compre agora mesmo:**",
-        "• **Robux:** entrega em 1 a 2 dias úteis (exemplo).",
-        "• **Gamepass:** envio instantâneo (exemplo).",
+        "• **Tabela:** 1000 Robux = " + brl(RATE_PER_1000),
+        "• **Taxa Roblox:** ao comprar gamepass, você recebe **70%** (Roblox retém 30%).",
         "",
-        `📌 **Tabela:** 1000 Robux = ${brl(RATE_PER_1000)}`,
+        "Use os botões abaixo:",
+        "— **Comprar quantia específica**: escolhe modo e informa Nick + Robux.",
+        "— **Calcular valores**: mostra exemplo e permite testar valores.",
       ].join("\n")
-    )
-    .setImage("https://SUA-IMAGEM-AQUI.com/banner.png"); // troque
+    );
+
+  if (PANEL_IMAGE_URL && PANEL_IMAGE_URL.startsWith("http")) {
+    embed.setImage(PANEL_IMAGE_URL);
+  }
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -58,98 +122,152 @@ async function sendPanel(channel) {
   await channel.send({ embeds: [embed], components: [row] });
 }
 
-// 2) INTERAÇÕES (botões)
-async function handleInteraction(interaction) {
-  // Botão: comprar
-  if (interaction.isButton() && interaction.customId === "buy_specific") {
-    // Primeiro: escolher com/sem taxa antes de ticket
-    const select = new StringSelectMenuBuilder()
-      .setCustomId("choose_tax_mode")
-      .setPlaceholder("Selecione como você quer pagar")
-      .addOptions([
-        { label: "Cobrir taxa (+30%)", value: "cover_tax" },
-        { label: "Sem taxa (valor normal)", value: "no_tax" },
-      ]);
-
-    const row = new ActionRowBuilder().addComponents(select);
-
-    return interaction.reply({
-      content: "Antes de abrir o ticket, escolha uma opção:",
-      components: [row],
-      ephemeral: true,
-    });
-  }
-
-  // Select: modo de taxa
-  if (interaction.isStringSelectMenu() && interaction.customId === "choose_tax_mode") {
-    const mode = interaction.values[0]; // cover_tax | no_tax
-
-    // Agora abre modal pedindo Nick + Robux
-    const modal = new ModalBuilder()
-      .setCustomId(`order_modal:${mode}`)
-      .setTitle("Pedido de Robux");
-
-    const nick = new TextInputBuilder()
-      .setCustomId("nick")
-      .setLabel("Nick do Roblox")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const amount = new TextInputBuilder()
-      .setCustomId("robux")
-      .setLabel("Quantidade de Robux")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(nick),
-      new ActionRowBuilder().addComponents(amount)
-    );
-
-    return interaction.showModal(modal);
-  }
-
-  // Modal submit
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("order_modal:")) {
-    const mode = interaction.customId.split(":")[1];
-    const coverTax = mode === "cover_tax";
-
-    const nick = interaction.fields.getTextInputValue("nick").trim();
-    const robux = Number(interaction.fields.getTextInputValue("robux").trim());
-
-    if (!Number.isFinite(robux) || robux <= 0) {
-      return interaction.reply({ content: "Quantidade inválida.", ephemeral: true });
+// ===== INTERACTIONS =====
+client.on("interactionCreate", async (interaction) => {
+  try {
+    // /painel
+    if (interaction.isChatInputCommand() && interaction.commandName === "painel") {
+      await sendPanel(interaction.channel);
+      return interaction.reply({ content: "✅ Painel enviado.", ephemeral: true });
     }
 
-    const price = calcPriceBRL(robux, coverTax);
+    // Botão: comprar
+    if (interaction.isButton() && interaction.customId === "buy_specific") {
+      const select = new StringSelectMenuBuilder()
+        .setCustomId("choose_mode")
+        .setPlaceholder("Escolha o modo do pedido")
+        .addOptions([
+          {
+            label: "Sem taxa (gamepass normal; você recebe 70%)",
+            value: "no_tax",
+          },
+          {
+            label: "Cobrir taxa (você recebe o valor líquido desejado)",
+            value: "cover_tax",
+          },
+        ]);
 
-    // Se você quiser sugerir o preço do gamepass pra cobrir taxa real:
-    const gp = gamepassPriceToNet(robux);
+      const row = new ActionRowBuilder().addComponents(select);
 
-    return interaction.reply({
-      content:
-        `✅ **Pedido registrado**\n` +
-        `• Nick: **${nick}**\n` +
-        `• Robux: **${robux}**\n` +
-        `• Opção: **${coverTax ? "Cobrir taxa (+30%)" : "Sem taxa"}**\n` +
-        `• Total: **${brl(price)}**\n\n` +
-        `📌 **Instrução (Gamepass):**\n` +
-        `- Se quiser receber líquido com taxa real de 30%, a gamepass geralmente precisa estar em: **${gp} Robux** (≈ robux/0.7).\n`,
-      ephemeral: true,
-    });
+      return interaction.reply({
+        content: "Escolha uma opção antes de continuar:",
+        components: [row],
+        ephemeral: true,
+      });
+    }
+
+    // Select: modo escolhido -> abre modal
+    if (interaction.isStringSelectMenu() && interaction.customId === "choose_mode") {
+      const mode = interaction.values[0]; // no_tax | cover_tax
+
+      const modal = new ModalBuilder()
+        .setCustomId(`order_modal:${mode}`)
+        .setTitle("Pedido de Robux");
+
+      const nick = new TextInputBuilder()
+        .setCustomId("nick")
+        .setLabel("Nick do Roblox")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const robux = new TextInputBuilder()
+        .setCustomId("robux")
+        .setLabel(mode === "cover_tax" ? "Robux líquidos desejados" : "Robux da gamepass")
+        .setPlaceholder(mode === "cover_tax" ? "Ex: 1000" : "Ex: 1000")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(nick),
+        new ActionRowBuilder().addComponents(robux)
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    // Modal submit -> calcula e responde
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("order_modal:")) {
+      const mode = interaction.customId.split(":")[1];
+      const nick = interaction.fields.getTextInputValue("nick").trim();
+      const robuxInputRaw = interaction.fields.getTextInputValue("robux").trim();
+      const robuxInput = Number(robuxInputRaw.replace(/[^\d]/g, ""));
+
+      if (!Number.isFinite(robuxInput) || robuxInput <= 0) {
+        return interaction.reply({ content: "❌ Quantidade inválida.", ephemeral: true });
+      }
+
+      let gamepassRobux;
+      let netRobux;
+      let price;
+
+      if (mode === "no_tax") {
+        gamepassRobux = robuxInput;
+        netRobux = netFromGp(gamepassRobux);
+        price = priceFromRobux(gamepassRobux);
+      } else {
+        // cover_tax: robuxInput é o líquido desejado
+        netRobux = robuxInput;
+        gamepassRobux = gpToNetTarget(netRobux);
+        price = priceFromRobux(gamepassRobux);
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(PURPLE)
+        .setTitle("✅ Cálculo do pedido")
+        .setDescription(
+          [
+            `**Nick:** ${nick}`,
+            `**Modo:** ${mode === "cover_tax" ? "Cobrir taxa (líquido)" : "Sem taxa"}`,
+            "",
+            `**Gamepass:** ${gamepassRobux} Robux`,
+            `**Você recebe:** ${netRobux} Robux${mode === "no_tax" ? " (70% do valor)" : " (líquido)"}`,
+            `**Total:** ${brl(round2(price))}`,
+            "",
+            "**Instrução:**",
+            `Crie uma gamepass de **${gamepassRobux} Robux** e envie o link.`,
+          ].join("\n")
+        );
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    // Botão: calculadora (mensagem + mini instrução)
+    if (interaction.isButton() && interaction.customId === "calc_values") {
+      // exemplo para 1000 líquidos e 1000 gamepass
+      const gpCover1000 = gpToNetTarget(1000);
+      const priceNoTax1000 = priceFromRobux(1000);
+      const priceCover1000 = priceFromRobux(gpCover1000);
+
+      const embed = new EmbedBuilder()
+        .setColor(PURPLE)
+        .setTitle("🧮 Calculadora de Robux")
+        .setDescription(
+          [
+            `**Tabela:** 1000 Robux = ${brl(RATE_PER_1000)}`,
+            `**Taxa Roblox:** você recebe 70% (Roblox retém 30%).`,
+            "",
+            "**Exemplo (1000):**",
+            `• **Sem taxa:** gamepass 1000 → você recebe 700 → ${brl(round2(priceNoTax1000))}`,
+            `• **Cobrir taxa (1000 líquido):** gamepass ${gpCover1000} → você recebe 1000 → ${brl(round2(priceCover1000))}`,
+            "",
+            "Para calcular um valor específico, clique em **Comprar quantia específica**.",
+          ].join("\n")
+        );
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+  } catch (err) {
+    console.error(err);
+    if (interaction.isRepliable()) {
+      try {
+        await interaction.reply({ content: "❌ Deu erro aqui. Confira o console do bot.", ephemeral: true });
+      } catch {}
+    }
   }
+});
 
-  // Botão: calcular valores
-  if (interaction.isButton() && interaction.customId === "calc_values") {
-    return interaction.reply({
-      content:
-        `📌 **Calculadora**\n` +
-        `• 1000 Robux = ${brl(RATE_PER_1000)}\n` +
-        `• Com taxa (+30%) = ${brl(RATE_PER_1000 * 1.3)} por 1000\n\n` +
-        `Me diga uma quantidade (ex.: 2500) que eu calculo também.`,
-      ephemeral: true,
-    });
-  }
-}
-
-module.exports = { sendPanel, handleInteraction };
+// ===== START =====
+(async () => {
+  await registerCommands();
+  await client.login(TOKEN);
+})();
