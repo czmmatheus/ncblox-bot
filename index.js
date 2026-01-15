@@ -4,76 +4,90 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events
+  Events,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ChannelType,
+  PermissionsBitField
 } = require("discord.js");
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-function painelRow() {
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // opcional
+const PANEL_CHANNEL = process.env.PANEL_CHANNEL;
+
+function panelRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId("comprar")
+      .setCustomId("open_buy_modal")
       .setLabel("📦 Comprar Robux")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
-      .setCustomId("cancelar")
+      .setCustomId("cancel_panel")
       .setLabel("❌ Cancelar")
       .setStyle(ButtonStyle.Danger)
   );
 }
 
-process.on("unhandledRejection", (err) => {
-  console.log("unhandledRejection:", err);
-});
-process.on("uncaughtException", (err) => {
-  console.log("uncaughtException:", err);
-});
+function staffRow(orderId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`confirm_${orderId}`)
+      .setLabel("✅ Confirmar")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`deny_${orderId}`)
+      .setLabel("❌ Cancelar")
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+process.on("unhandledRejection", (err) => console.log("unhandledRejection:", err));
+process.on("uncaughtException", (err) => console.log("uncaughtException:", err));
 
 client.once(Events.ClientReady, async () => {
-  console.log("NcBlox pronto!");
+  console.log(`NcBlox pronto! ${client.user.tag}`);
 
-  const channelId = process.env.PANEL_CHANNEL;
-  if (!channelId) {
-    console.log("ERRO: PANEL_CHANNEL não existe nas Variables.");
-    return; // não derruba o bot
+  if (!PANEL_CHANNEL) {
+    console.log("ERRO: PANEL_CHANNEL não definido nas Variables.");
+    return;
   }
 
   try {
-    const ch = await client.channels.fetch(channelId);
-    if (!ch) {
-      console.log("ERRO: canal não encontrado. Confira o ID.");
-      return;
-    }
-
+    const ch = await client.channels.fetch(PANEL_CHANNEL);
     await ch.send({
-      content: "**🛍️ Central de Pedidos — NcBlox**\nClique em uma opção:",
-      components: [painelRow()]
+      content: "🎁 **Central de Pedidos — NcBlox**\nClique em uma opção:",
+      components: [panelRow()]
     });
-
-    console.log("Painel enviado com sucesso.");
+    console.log("Painel enviado.");
   } catch (e) {
-    console.log("ERRO ao enviar painel (sem derrubar o bot):", e?.message || e);
+    console.log("ERRO ao enviar painel:", e?.message || e);
   }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton()) return;
+  // 1) Botão: abrir formulário
+  if (interaction.isButton() && interaction.customId === "open_buy_modal") {
+    const modal = new ModalBuilder()
+      .setCustomId("buy_modal")
+      .setTitle("Pedido de Robux");
 
-  if (interaction.customId === "comprar") {
-    return interaction.reply({
-      content: "📦 **Pedido iniciado!**\nEnvie seu usuário do Roblox e a quantidade de Robux.",
-      ephemeral: true
-    });
-  }
+    const userInput = new TextInputBuilder()
+      .setCustomId("roblox_user")
+      .setLabel("Usuário do Roblox")
+      .setPlaceholder("ex: cheroso_game")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
 
-  if (interaction.customId === "cancelar") {
-    return interaction.reply({
-      content: "❌ Pedido cancelado.",
-      ephemeral: true
-    });
-  }
-});
+    const amountInput = new TextInputBuilder()
+      .setCustomId("robux_amount")
+      .setLabel("Quantidade de Robux")
+      .setPlaceholder("ex: 438")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
 
-client.login(process.env.TOKEN);
+    modal.addComponents(
+      new ActionRowBuilder().addComponents
