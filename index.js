@@ -1,144 +1,155 @@
 const {
-  Client,
-  GatewayIntentBits,
+  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events,
+  StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  ChannelType,
-  PermissionsBitField
 } = require("discord.js");
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// CONFIG
+const RATE_PER_1000 = 30; // R$ 30 por 1000 robux
+const TAX_MULTIPLIER = 1.3; // "com taxa" = +30% => 39 por 1000
+const PURPLE = 0x7c3aed;
 
-const PANEL_CHANNEL = process.env.PANEL_CHANNEL;
-
-function panelRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("open_buy_modal").setLabel("📦 Comprar Robux").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("cancel_panel").setLabel("❌ Cancelar").setStyle(ButtonStyle.Danger),
-  );
+function brl(n) {
+  return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
-function staffRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("confirm_order").setLabel("✅ Confirmar").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("deny_order").setLabel("❌ Cancelar").setStyle(ButtonStyle.Danger),
-  );
+function calcPriceBRL(robux, coverTax) {
+  const base = (robux / 1000) * RATE_PER_1000;
+  return coverTax ? base * TAX_MULTIPLIER : base;
 }
 
-process.on("unhandledRejection", (e) => console.log("unhandledRejection:", e));
-process.on("uncaughtException", (e) => console.log("uncaughtException:", e));
+// (Opcional) cálculo do gamepass pra cobrir taxa real 30% do Roblox:
+function gamepassPriceToNet(robuxDesired) {
+  return Math.ceil(robuxDesired / 0.7);
+}
 
-client.once(Events.ClientReady, async () => {
-  console.log("NcBlox pronto!");
+// 1) ENVIAR O PAINEL (ex.: comando /painel)
+async function sendPanel(channel) {
+  const embed = new EmbedBuilder()
+    .setColor(PURPLE)
+    .setTitle("Central de pedidos - New Store")
+    .setDescription(
+      [
+        "**Compre agora mesmo:**",
+        "• **Robux:** entrega em 1 a 2 dias úteis (exemplo).",
+        "• **Gamepass:** envio instantâneo (exemplo).",
+        "",
+        `📌 **Tabela:** 1000 Robux = ${brl(RATE_PER_1000)}`,
+      ].join("\n")
+    )
+    .setImage("https://SUA-IMAGEM-AQUI.com/banner.png"); // troque
 
-  if (!PANEL_CHANNEL) {
-    console.log("ERRO: PANEL_CHANNEL não definido.");
-    return;
-  }
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("buy_specific")
+      .setLabel("Comprar quantia específica")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("calc_values")
+      .setLabel("Calcular valores")
+      .setStyle(ButtonStyle.Secondary)
+  );
 
-  try {
-    const ch = await client.channels.fetch(PANEL_CHANNEL);
-    await ch.send({
-      content: "🎁 **Central de Pedidos — NcBlox**\nClique em uma opção:",
-      components: [panelRow()]
+  await channel.send({ embeds: [embed], components: [row] });
+}
+
+// 2) INTERAÇÕES (botões)
+async function handleInteraction(interaction) {
+  // Botão: comprar
+  if (interaction.isButton() && interaction.customId === "buy_specific") {
+    // Primeiro: escolher com/sem taxa antes de ticket
+    const select = new StringSelectMenuBuilder()
+      .setCustomId("choose_tax_mode")
+      .setPlaceholder("Selecione como você quer pagar")
+      .addOptions([
+        { label: "Cobrir taxa (+30%)", value: "cover_tax" },
+        { label: "Sem taxa (valor normal)", value: "no_tax" },
+      ]);
+
+    const row = new ActionRowBuilder().addComponents(select);
+
+    return interaction.reply({
+      content: "Antes de abrir o ticket, escolha uma opção:",
+      components: [row],
+      ephemeral: true,
     });
-    console.log("Painel enviado.");
-  } catch (e) {
-    console.log("ERRO ao enviar painel:", e?.message || e);
   }
-});
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  // Botão: abre modal
-  if (interaction.isButton() && interaction.customId === "open_buy_modal") {
-    const modal = new ModalBuilder().setCustomId("buy_modal").setTitle("Pedido de Robux");
+  // Select: modo de taxa
+  if (interaction.isStringSelectMenu() && interaction.customId === "choose_tax_mode") {
+    const mode = interaction.values[0]; // cover_tax | no_tax
 
-    const userInput = new TextInputBuilder()
-      .setCustomId("roblox_user")
-      .setLabel("Usuário do Roblox")
+    // Agora abre modal pedindo Nick + Robux
+    const modal = new ModalBuilder()
+      .setCustomId(`order_modal:${mode}`)
+      .setTitle("Pedido de Robux");
+
+    const nick = new TextInputBuilder()
+      .setCustomId("nick")
+      .setLabel("Nick do Roblox")
       .setStyle(TextInputStyle.Short)
       .setRequired(true);
 
-    const amountInput = new TextInputBuilder()
-      .setCustomId("robux_amount")
-      .setLabel("Quantidade de Robux (somente números)")
+    const amount = new TextInputBuilder()
+      .setCustomId("robux")
+      .setLabel("Quantidade de Robux")
       .setStyle(TextInputStyle.Short)
       .setRequired(true);
 
     modal.addComponents(
-      new ActionRowBuilder().addComponents(userInput),
-      new ActionRowBuilder().addComponents(amountInput)
+      new ActionRowBuilder().addComponents(nick),
+      new ActionRowBuilder().addComponents(amount)
     );
 
     return interaction.showModal(modal);
   }
 
-  // Modal enviado: cria ticket
-  if (interaction.isModalSubmit() && interaction.customId === "buy_modal") {
-    const robloxUser = interaction.fields.getTextInputValue("roblox_user").trim();
-    const raw = interaction.fields.getTextInputValue("robux_amount").trim();
-    const robuxAmount = Number(raw.replace(/[^\d]/g, ""));
+  // Modal submit
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("order_modal:")) {
+    const mode = interaction.customId.split(":")[1];
+    const coverTax = mode === "cover_tax";
 
-    if (!robuxAmount || robuxAmount <= 0) {
-      return interaction.reply({ content: "❌ Quantidade inválida. Ex: 438", ephemeral: true });
+    const nick = interaction.fields.getTextInputValue("nick").trim();
+    const robux = Number(interaction.fields.getTextInputValue("robux").trim());
+
+    if (!Number.isFinite(robux) || robux <= 0) {
+      return interaction.reply({ content: "Quantidade inválida.", ephemeral: true });
     }
 
-    const guild = interaction.guild;
-    const orderId = Date.now().toString().slice(-6);
+    const price = calcPriceBRL(robux, coverTax);
 
-    // cria canal privado
-    const overwrites = [
-      { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-      { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-      { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageChannels] }
-    ];
+    // Se você quiser sugerir o preço do gamepass pra cobrir taxa real:
+    const gp = gamepassPriceToNet(robux);
 
-    let ticket;
-    try {
-      ticket = await guild.channels.create({
-        name: `pedido-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
-        type: ChannelType.GuildText,
-        permissionOverwrites: overwrites
-      });
-    } catch (e) {
-      console.log("ERRO criando canal:", e?.message || e);
-      return interaction.reply({
-        content: "❌ Não consegui criar o canal. Verifique se o bot tem **Gerenciar Canais** e se o cargo dele está acima.",
-        ephemeral: true
-      });
-    }
-
-    await ticket.send({
+    return interaction.reply({
       content:
-`🧾 **Novo Pedido (#${orderId})**
-👤 Cliente: <@${interaction.user.id}>
-🎮 Roblox: **${robloxUser}**
-💰 Robux: **${robuxAmount}**
-
-📎 Envie o comprovante aqui (se tiver).`,
-      components: [staffRow()]
+        `✅ **Pedido registrado**\n` +
+        `• Nick: **${nick}**\n` +
+        `• Robux: **${robux}**\n` +
+        `• Opção: **${coverTax ? "Cobrir taxa (+30%)" : "Sem taxa"}**\n` +
+        `• Total: **${brl(price)}**\n\n` +
+        `📌 **Instrução (Gamepass):**\n` +
+        `- Se quiser receber líquido com taxa real de 30%, a gamepass geralmente precisa estar em: **${gp} Robux** (≈ robux/0.7).\n`,
+      ephemeral: true,
     });
-
-    return interaction.reply({ content: `✅ Pedido criado: <#${ticket.id}>`, ephemeral: true });
   }
 
-  // Botões dentro do ticket
-  if (interaction.isButton() && interaction.customId === "confirm_order") {
-    return interaction.reply("✅ **Confirmado!** (entrega autorizada)");
+  // Botão: calcular valores
+  if (interaction.isButton() && interaction.customId === "calc_values") {
+    return interaction.reply({
+      content:
+        `📌 **Calculadora**\n` +
+        `• 1000 Robux = ${brl(RATE_PER_1000)}\n` +
+        `• Com taxa (+30%) = ${brl(RATE_PER_1000 * 1.3)} por 1000\n\n` +
+        `Me diga uma quantidade (ex.: 2500) que eu calculo também.`,
+      ephemeral: true,
+    });
   }
+}
 
-  if (interaction.isButton() && interaction.customId === "deny_order") {
-    return interaction.reply("❌ **Cancelado.**");
-  }
-
-  if (interaction.isButton() && interaction.customId === "cancel_panel") {
-    return interaction.reply({ content: "Ok 👍", ephemeral: true });
-  }
-});
-
-client.login(process.env.TOKEN);
+module.exports = { sendPanel, handleInteraction };
