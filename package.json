@@ -1,15 +1,17 @@
 {
   "name": "ncblox-bot",
   "version": "1.0.0",
-  "description": "NCBlox Discord Bot",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "node-fetch": "^2.6.12",
-    "cheerio": "^1.0.0-rc.12"
+    "axios": "^1.6.8",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
