@@ -1,4 +1,12 @@
 {
-  "panel": null,
+  "panel": {
+    "title": "🛒 Loja",
+    "description": "Selecione um produto abaixo.",
+    "banner": "",
+    "channelId": "",
+    "messageId": ""
+  },
+  "pix": "",
+  "terms": "",
   "products": []
 }
