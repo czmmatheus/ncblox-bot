@@ -5,12 +5,16 @@ const {
   GatewayIntentBits,
   EmbedBuilder,
   ActionRowBuilder,
-  StringSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   SlashCommandBuilder,
   REST,
-  Routes
+  Routes,
+  PermissionsBitField
 } = require("discord.js");
 
 const client = new Client({
@@ -20,9 +24,6 @@ const client = new Client({
 const TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 
-// PIX FIXO (depois podemos deixar configurável)
-const PIX_COPIA_COLA = "SEU_PIX_AQUI";
-
 function loadConfig() {
   return JSON.parse(fs.readFileSync("./config.json"));
 }
@@ -31,156 +32,211 @@ function saveConfig(data) {
   fs.writeFileSync("./config.json", JSON.stringify(data, null, 2));
 }
 
+function createPanelEmbed(config) {
+  const embed = new EmbedBuilder()
+    .setTitle(config.panel.title)
+    .setDescription(config.panel.description)
+    .setColor(0x7c3aed);
+
+  if (config.panel.banner) embed.setImage(config.panel.banner);
+
+  return embed;
+}
+
 client.once("ready", async () => {
   console.log("Bot online");
 
   const commands = [
     new SlashCommandBuilder()
       .setName("painel")
-      .setDescription("Criar painel"),
-    new SlashCommandBuilder()
-      .setName("produto")
-      .setDescription("Gerenciar produtos")
+      .setDescription("Configurar painel")
       .addSubcommand(s =>
-        s.setName("add")
-          .setDescription("Adicionar produto")
-          .addStringOption(o => o.setName("nome").setDescription("Nome").setRequired(true))
-          .addNumberOption(o => o.setName("preco").setDescription("Preço").setRequired(true))
-      )
-      .addSubcommand(s =>
-        s.setName("listar").setDescription("Listar produtos")
-      )
+        s.setName("configurar")
+         .setDescription("Abrir editor do painel"))
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
+  await rest.put(
+    Routes.applicationGuildCommands(client.user.id, GUILD_ID),
+    { body: commands }
+  );
 });
 
 client.on("interactionCreate", async interaction => {
 
   const config = loadConfig();
 
+  // ===== COMANDO =====
   if (interaction.isChatInputCommand()) {
 
-    if (interaction.commandName === "produto") {
-
-      if (interaction.options.getSubcommand() === "add") {
-        const nome = interaction.options.getString("nome");
-        const preco = interaction.options.getNumber("preco");
-
-        config.products.push({ nome, preco });
-        saveConfig(config);
-
-        return interaction.reply({ content: "Produto adicionado.", ephemeral: true });
-      }
-
-      if (interaction.options.getSubcommand() === "listar") {
-        if (config.products.length === 0)
-          return interaction.reply({ content: "Nenhum produto.", ephemeral: true });
-
-        const lista = config.products.map(p => `${p.nome} - R$${p.preco}`).join("\n");
-        return interaction.reply({ content: lista, ephemeral: true });
-      }
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({ content: "❌ Apenas administradores.", ephemeral: true });
     }
 
-    if (interaction.commandName === "painel") {
+    const editor = new EmbedBuilder()
+      .setTitle("⚙️ Editor de Painel")
+      .setDescription("Configure seu painel abaixo.")
+      .setColor(0x7c3aed);
 
-      if (config.products.length === 0)
-        return interaction.reply({ content: "Adicione produtos primeiro.", ephemeral: true });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("edit_title").setLabel("Editar Título").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("edit_desc").setLabel("Editar Descrição").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("edit_banner").setLabel("Editar Banner").setStyle(ButtonStyle.Primary),
+    );
 
-      const embed = new EmbedBuilder()
-        .setTitle("🛒 Loja")
-        .setDescription("Selecione um produto abaixo.")
-        .setColor(0x7c3aed);
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("manage_products").setLabel("Produtos").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("edit_pix").setLabel("Editar PIX").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("save_panel").setLabel("Salvar Painel").setStyle(ButtonStyle.Success)
+    );
+
+    return interaction.reply({
+      embeds: [editor],
+      components: [row, row2],
+      ephemeral: true
+    });
+  }
+
+  // ===== BOTÕES =====
+  if (interaction.isButton()) {
+
+    // EDITAR TÍTULO
+    if (interaction.customId === "edit_title") {
+      const modal = new ModalBuilder()
+        .setCustomId("modal_title")
+        .setTitle("Editar Título");
+
+      const input = new TextInputBuilder()
+        .setCustomId("title")
+        .setLabel("Novo título")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
+
+    // EDITAR DESCRIÇÃO
+    if (interaction.customId === "edit_desc") {
+      const modal = new ModalBuilder()
+        .setCustomId("modal_desc")
+        .setTitle("Editar Descrição");
+
+      const input = new TextInputBuilder()
+        .setCustomId("desc")
+        .setLabel("Nova descrição")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
+
+    // EDITAR BANNER
+    if (interaction.customId === "edit_banner") {
+      const modal = new ModalBuilder()
+        .setCustomId("modal_banner")
+        .setTitle("Editar Banner");
+
+      const input = new TextInputBuilder()
+        .setCustomId("banner")
+        .setLabel("URL da imagem")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal);
+    }
+
+    // GERENCIAR PRODUTOS
+    if (interaction.customId === "manage_products") {
+      const modal = new ModalBuilder()
+        .setCustomId("modal_product")
+        .setTitle("Adicionar Produto");
+
+      const name = new TextInputBuilder()
+        .setCustomId("name")
+        .setLabel("Nome do Produto")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const price = new TextInputBuilder()
+        .setCustomId("price")
+        .setLabel("Preço")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(name),
+        new ActionRowBuilder().addComponents(price)
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    // SALVAR PAINEL
+    if (interaction.customId === "save_panel") {
+
+      if (!config.panel.channelId)
+        config.panel.channelId = interaction.channel.id;
+
+      const channel = await client.channels.fetch(config.panel.channelId);
+
+      const embed = createPanelEmbed(config);
 
       const menu = new StringSelectMenuBuilder()
-        .setCustomId("select_produto")
+        .setCustomId("select_product")
         .setPlaceholder("Escolha um produto")
         .addOptions(
           config.products.map(p => ({
-            label: p.nome,
-            description: `Preço: R$${p.preco}`,
-            value: p.nome
+            label: p.name,
+            description: `R$ ${p.price}`,
+            value: p.name
           }))
         );
 
       const row = new ActionRowBuilder().addComponents(menu);
 
-      await interaction.channel.send({ embeds: [embed], components: [row] });
+      if (config.panel.messageId) {
+        const msg = await channel.messages.fetch(config.panel.messageId);
+        await msg.edit({ embeds: [embed], components: [row] });
+      } else {
+        const msg = await channel.send({ embeds: [embed], components: [row] });
+        config.panel.messageId = msg.id;
+      }
 
-      interaction.reply({ content: "Painel criado.", ephemeral: true });
+      saveConfig(config);
+
+      return interaction.reply({ content: "✅ Painel salvo/atualizado.", ephemeral: true });
     }
   }
 
-  // SELECIONAR PRODUTO
-  if (interaction.isStringSelectMenu()) {
-    if (interaction.customId === "select_produto") {
+  // ===== MODAIS =====
+  if (interaction.isModalSubmit()) {
 
-      const produto = config.products.find(p => p.nome === interaction.values[0]);
-
-      const carrinho = new EmbedBuilder()
-        .setTitle("🛒 Bem-vindo ao seu Carrinho")
-        .setDescription(`Você está comprando: **${produto.nome}**`)
-        .addFields(
-          { name: "Valor", value: `R$ ${produto.preco}`, inline: true },
-          { name: "Quantidade", value: "1", inline: true }
-        )
-        .setColor(0x7c3aed);
-
-      const botoes = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`pagar_${produto.nome}`)
-          .setLabel("Ir para Pagamento")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId("cancelar")
-          .setLabel("Cancelar")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await interaction.reply({
-        embeds: [carrinho],
-        components: [botoes],
-        ephemeral: true
-      });
+    if (interaction.customId === "modal_title") {
+      config.panel.title = interaction.fields.getTextInputValue("title");
     }
+
+    if (interaction.customId === "modal_desc") {
+      config.panel.description = interaction.fields.getTextInputValue("desc");
+    }
+
+    if (interaction.customId === "modal_banner") {
+      config.panel.banner = interaction.fields.getTextInputValue("banner");
+    }
+
+    if (interaction.customId === "modal_product") {
+      const name = interaction.fields.getTextInputValue("name");
+      const price = interaction.fields.getTextInputValue("price");
+
+      config.products.push({ name, price });
+    }
+
+    saveConfig(config);
+
+    return interaction.reply({ content: "Salvo com sucesso.", ephemeral: true });
   }
 
-  // PAGAMENTO
-  if (interaction.isButton()) {
-
-    if (interaction.customId.startsWith("pagar_")) {
-
-      const produtoNome = interaction.customId.replace("pagar_", "");
-      const produto = config.products.find(p => p.nome === produtoNome);
-
-      const pagamento = new EmbedBuilder()
-        .setTitle("💳 Confirmação de Compra")
-        .setDescription(`Produto: **${produto.nome}**`)
-        .addFields(
-          { name: "Valor Total", value: `R$ ${produto.preco}` }
-        )
-        .setColor(0x22c55e);
-
-      await interaction.update({
-        embeds: [pagamento],
-        components: []
-      });
-
-      await interaction.followUp({
-        content: `🔐 PIX Copia e Cola:\n\`\`\`${PIX_COPIA_COLA}\`\`\``,
-        ephemeral: true
-      });
-    }
-
-    if (interaction.customId === "cancelar") {
-      await interaction.update({
-        content: "Compra cancelada.",
-        embeds: [],
-        components: []
-      });
-    }
-  }
 });
-
 client.login(TOKEN);
