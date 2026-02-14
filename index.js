@@ -1,82 +1,53 @@
 require("dotenv").config();
 const fs = require("fs");
-const QRCode = require("qrcode");
 const {
   Client,
   GatewayIntentBits,
+  PermissionsBitField,
   EmbedBuilder,
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   StringSelectMenuBuilder,
+  ChannelType,
   SlashCommandBuilder,
   REST,
-  Routes,
-  AttachmentBuilder
+  Routes
 } = require("discord.js");
-
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
 
 const TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
+const TICKET_CATEGORY_ID = "1472141492293206077";
 
-// ===== CARREGAR ARQUIVOS =====
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+});
+
 function loadDB() {
   return JSON.parse(fs.readFileSync("./database.json"));
+}
+
+function saveDB(data) {
+  fs.writeFileSync("./database.json", JSON.stringify(data, null, 2));
 }
 
 function loadConfig() {
   return JSON.parse(fs.readFileSync("./config.json"));
 }
 
-// ===== CRC16 =====
-function crc16(str) {
-  let crc = 0xFFFF;
-  for (let i = 0; i < str.length; i++) {
-    crc ^= str.charCodeAt(i) << 8;
-    for (let j = 0; j < 8; j++) {
-      if ((crc & 0x8000) !== 0) {
-        crc = (crc << 1) ^ 0x1021;
-      } else {
-        crc <<= 1;
-      }
-      crc &= 0xFFFF;
-    }
-  }
-  return crc.toString(16).toUpperCase().padStart(4, "0");
-}
-
-// ===== GERAR PIX OFICIAL =====
-function generatePix(key, name, city, amount) {
-
-  const formattedAmount = amount.toFixed(2);
-
-  const payload =
-    "000201" +
-    "26580014BR.GOV.BCB.PIX01" +
-    key.length.toString().padStart(2, "0") +
-    key +
-    "52040000" +
-    "5303986" +
-    "54" + formattedAmount.length.toString().padStart(2, "0") + formattedAmount +
-    "5802BR" +
-    "59" + name.length.toString().padStart(2, "0") + name +
-    "60" + city.length.toString().padStart(2, "0") + city +
-    "62070503***" +
-    "6304";
-
-  const crc = crc16(payload);
-  return payload + crc;
-}
-
-// ===== REGISTRAR COMANDO =====
 client.once("ready", async () => {
   console.log("Bot online");
 
   const commands = [
     new SlashCommandBuilder()
       .setName("painel")
-      .setDescription("Criar painel da loja")
+      .setDescription("Criar painel"),
+    new SlashCommandBuilder()
+      .setName("produto")
+      .setDescription("Adicionar produto")
+      .addStringOption(o => o.setName("id").setDescription("ID").setRequired(true))
+      .addStringOption(o => o.setName("nome").setDescription("Nome").setRequired(true))
+      .addNumberOption(o => o.setName("preco").setDescription("Preço").setRequired(true))
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -86,42 +57,58 @@ client.once("ready", async () => {
   );
 });
 
-// ===== INTERAÇÕES =====
+// ---------- INTERAÇÕES ----------
 client.on("interactionCreate", async interaction => {
 
   const db = loadDB();
   const config = loadConfig();
 
-  // CRIAR PAINEL
+  // ADICIONAR PRODUTO
   if (interaction.isChatInputCommand()) {
 
-    const embed = new EmbedBuilder()
-      .setTitle("🛒 Loja Oficial")
-      .setDescription("Selecione um produto abaixo.")
-      .setColor(0x7c3aed);
+    if (interaction.commandName === "produto") {
 
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId("select_product")
-      .setPlaceholder("Escolha um produto")
-      .addOptions(
-        db.products.map(p => ({
-          label: p.name,
-          description: `R$ ${p.price}`,
-          value: p.id
-        }))
-      );
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+        return interaction.reply({ content: "Apenas admin.", ephemeral: true });
 
-    const row = new ActionRowBuilder().addComponents(menu);
+      const id = interaction.options.getString("id");
+      const nome = interaction.options.getString("nome");
+      const preco = interaction.options.getNumber("preco");
 
-    await interaction.channel.send({
-      embeds: [embed],
-      components: [row]
-    });
+      db.products.push({
+        id,
+        name: nome,
+        price: preco,
+        stock: []
+      });
 
-    return interaction.reply({
-      content: "Painel criado com sucesso.",
-      ephemeral: true
-    });
+      saveDB(db);
+      return interaction.reply({ content: "Produto criado.", ephemeral: true });
+    }
+
+    if (interaction.commandName === "painel") {
+
+      const embed = new EmbedBuilder()
+        .setTitle("🛒 Loja")
+        .setDescription("Selecione um produto.")
+        .setColor(0x7c3aed);
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId("select_product")
+        .setPlaceholder("Escolha um produto")
+        .addOptions(
+          db.products.map(p => ({
+            label: p.name,
+            description: `R$ ${p.price}`,
+            value: p.id
+          }))
+        );
+
+      const row = new ActionRowBuilder().addComponents(menu);
+
+      await interaction.channel.send({ embeds: [embed], components: [row] });
+      return interaction.reply({ content: "Painel criado.", ephemeral: true });
+    }
   }
 
   // SELECIONAR PRODUTO
@@ -130,31 +117,134 @@ client.on("interactionCreate", async interaction => {
     const product = db.products.find(p => p.id === interaction.values[0]);
     if (!product) return;
 
-    const pixCode = generatePix(
-      config.pixKey,
-      config.receiverName,
-      config.receiverCity,
-      product.price
-    );
-
-    const qrBuffer = await QRCode.toBuffer(pixCode);
-    const attachment = new AttachmentBuilder(qrBuffer, { name: "pix.png" });
-
     const embed = new EmbedBuilder()
       .setTitle("💳 Pagamento PIX")
       .addFields(
         { name: "Produto", value: product.name },
         { name: "Valor", value: `R$ ${product.price.toFixed(2)}` },
-        { name: "PIX Copia e Cola", value: `\`\`\`${pixCode}\`\`\`` }
+        { name: "Chave PIX", value: config.pixKey }
       )
-      .setImage("attachment://pix.png")
       .setColor(0x22c55e);
 
-    await interaction.reply({
-      embeds: [embed],
-      files: [attachment],
-      ephemeral: true
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`buy_${product.id}`)
+        .setLabel("Enviar Comprovante")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+  }
+
+  // CRIAR TICKET
+  if (interaction.isButton() && interaction.customId.startsWith("buy_")) {
+
+    const productId = interaction.customId.replace("buy_", "");
+    const product = db.products.find(p => p.id === productId);
+    if (!product) return;
+
+    const ticket = await interaction.guild.channels.create({
+      name: `ticket-${interaction.user.username}`,
+      type: ChannelType.GuildText,
+      parent: TICKET_CATEGORY_ID,
+      permissionOverwrites: [
+        {
+          id: interaction.guild.id,
+          deny: ["ViewChannel"]
+        },
+        {
+          id: interaction.user.id,
+          allow: ["ViewChannel", "SendMessages"]
+        }
+      ]
     });
+
+    db.orders.push({
+      userId: interaction.user.id,
+      productId: product.id,
+      ticketId: ticket.id,
+      status: "AWAITING_PROOF"
+    });
+
+    saveDB(db);
+
+    await ticket.send(
+      `🧾 Olá <@${interaction.user.id}>\n\nEnvie o comprovante do pagamento aqui.\n\nValor: R$ ${product.price}`
+    );
+
+    return interaction.reply({ content: "Ticket criado.", ephemeral: true });
+  }
+
+  // DETECTAR COMPROVANTE (ANEXO)
+  if (interaction.isMessageComponent()) return;
+
+});
+
+
+// DETECTAR MENSAGENS NO TICKET
+client.on("messageCreate", async message => {
+
+  if (message.author.bot) return;
+
+  const db = loadDB();
+  const config = loadConfig();
+
+  const order = db.orders.find(o => o.ticketId === message.channel.id);
+  if (!order) return;
+
+  if (message.attachments.size > 0 && order.status === "AWAITING_PROOF") {
+
+    order.status = "PROOF_SENT";
+    saveDB(db);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`confirm_${message.channel.id}`)
+        .setLabel("Confirmar Pagamento")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`deny_${message.channel.id}`)
+        .setLabel("Negar")
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    message.channel.send({
+      content: "🔔 Comprovante recebido. Staff confirme abaixo:",
+      components: [row]
+    });
+  }
+});
+
+// CONFIRMAR PAGAMENTO
+client.on("interactionCreate", async interaction => {
+
+  if (!interaction.isButton()) return;
+
+  const db = loadDB();
+
+  if (interaction.customId.startsWith("confirm_")) {
+
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return interaction.reply({ content: "Apenas staff.", ephemeral: true });
+
+    const ticketId = interaction.customId.replace("confirm_", "");
+    const order = db.orders.find(o => o.ticketId === ticketId);
+    if (!order) return;
+
+    const product = db.products.find(p => p.id === order.productId);
+
+    if (product.stock.length === 0)
+      return interaction.reply({ content: "Sem estoque.", ephemeral: true });
+
+    const key = product.stock.shift();
+    saveDB(db);
+
+    const user = await client.users.fetch(order.userId);
+    await user.send(`🔐 Sua key:\n\`\`\`${key}\`\`\``);
+
+    await interaction.channel.send("✅ Pagamento confirmado. Produto enviado.");
+
+    await interaction.channel.delete();
   }
 
 });
