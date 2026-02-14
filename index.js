@@ -6,6 +6,8 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   SlashCommandBuilder,
   REST,
   Routes
@@ -17,6 +19,9 @@ const client = new Client({
 
 const TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
+
+// PIX FIXO (depois podemos deixar configurável)
+const PIX_COPIA_COLA = "SEU_PIX_AQUI";
 
 function loadConfig() {
   return JSON.parse(fs.readFileSync("./config.json"));
@@ -43,11 +48,6 @@ client.once("ready", async () => {
           .addNumberOption(o => o.setName("preco").setDescription("Preço").setRequired(true))
       )
       .addSubcommand(s =>
-        s.setName("remover")
-          .setDescription("Remover produto")
-          .addStringOption(o => o.setName("nome").setDescription("Nome").setRequired(true))
-      )
-      .addSubcommand(s =>
         s.setName("listar").setDescription("Listar produtos")
       )
   ].map(c => c.toJSON());
@@ -72,14 +72,6 @@ client.on("interactionCreate", async interaction => {
         saveConfig(config);
 
         return interaction.reply({ content: "Produto adicionado.", ephemeral: true });
-      }
-
-      if (interaction.options.getSubcommand() === "remover") {
-        const nome = interaction.options.getString("nome");
-        config.products = config.products.filter(p => p.nome !== nome);
-        saveConfig(config);
-
-        return interaction.reply({ content: "Produto removido.", ephemeral: true });
       }
 
       if (interaction.options.getSubcommand() === "listar") {
@@ -120,14 +112,72 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
+  // SELECIONAR PRODUTO
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "select_produto") {
 
       const produto = config.products.find(p => p.nome === interaction.values[0]);
 
+      const carrinho = new EmbedBuilder()
+        .setTitle("🛒 Bem-vindo ao seu Carrinho")
+        .setDescription(`Você está comprando: **${produto.nome}**`)
+        .addFields(
+          { name: "Valor", value: `R$ ${produto.preco}`, inline: true },
+          { name: "Quantidade", value: "1", inline: true }
+        )
+        .setColor(0x7c3aed);
+
+      const botoes = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`pagar_${produto.nome}`)
+          .setLabel("Ir para Pagamento")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId("cancelar")
+          .setLabel("Cancelar")
+          .setStyle(ButtonStyle.Danger)
+      );
+
       await interaction.reply({
-        content: `Você selecionou **${produto.nome}**\nValor: R$${produto.preco}`,
+        embeds: [carrinho],
+        components: [botoes],
         ephemeral: true
+      });
+    }
+  }
+
+  // PAGAMENTO
+  if (interaction.isButton()) {
+
+    if (interaction.customId.startsWith("pagar_")) {
+
+      const produtoNome = interaction.customId.replace("pagar_", "");
+      const produto = config.products.find(p => p.nome === produtoNome);
+
+      const pagamento = new EmbedBuilder()
+        .setTitle("💳 Confirmação de Compra")
+        .setDescription(`Produto: **${produto.nome}**`)
+        .addFields(
+          { name: "Valor Total", value: `R$ ${produto.preco}` }
+        )
+        .setColor(0x22c55e);
+
+      await interaction.update({
+        embeds: [pagamento],
+        components: []
+      });
+
+      await interaction.followUp({
+        content: `🔐 PIX Copia e Cola:\n\`\`\`${PIX_COPIA_COLA}\`\`\``,
+        ephemeral: true
+      });
+    }
+
+    if (interaction.customId === "cancelar") {
+      await interaction.update({
+        content: "Compra cancelada.",
+        embeds: [],
+        components: []
       });
     }
   }
