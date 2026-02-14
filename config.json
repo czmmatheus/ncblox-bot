@@ -1,12 +1,6 @@
 {
-  "panel": {
-    "title": "🛒 Loja",
-    "description": "Selecione um produto abaixo.",
-    "banner": "",
-    "channelId": "",
-    "messageId": ""
-  },
-  "pix": "",
-  "terms": "",
-  "products": []
+  "pixKey": "ec27f426-63ee-44a0-a078-60aa834e3e00",
+  "receiverName": "MATHEUS CASTANHO DE OLIVEIRA",
+  "receiverCity": "NOVO MUNDO",
+  "logChannelId": ""
 }
