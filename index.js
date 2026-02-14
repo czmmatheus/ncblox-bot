@@ -1,20 +1,16 @@
 require("dotenv").config();
 const fs = require("fs");
+const QRCode = require("qrcode");
 const {
   Client,
   GatewayIntentBits,
   EmbedBuilder,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   StringSelectMenuBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
   SlashCommandBuilder,
   REST,
   Routes,
-  PermissionsBitField
+  AttachmentBuilder
 } = require("discord.js");
 
 const client = new Client({
@@ -24,35 +20,63 @@ const client = new Client({
 const TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 
+// ===== CARREGAR ARQUIVOS =====
+function loadDB() {
+  return JSON.parse(fs.readFileSync("./database.json"));
+}
+
 function loadConfig() {
   return JSON.parse(fs.readFileSync("./config.json"));
 }
 
-function saveConfig(data) {
-  fs.writeFileSync("./config.json", JSON.stringify(data, null, 2));
+// ===== CRC16 =====
+function crc16(str) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < str.length; i++) {
+    crc ^= str.charCodeAt(i) << 8;
+    for (let j = 0; j < 8; j++) {
+      if ((crc & 0x8000) !== 0) {
+        crc = (crc << 1) ^ 0x1021;
+      } else {
+        crc <<= 1;
+      }
+      crc &= 0xFFFF;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
 }
 
-function createPanelEmbed(config) {
-  const embed = new EmbedBuilder()
-    .setTitle(config.panel.title)
-    .setDescription(config.panel.description)
-    .setColor(0x7c3aed);
+// ===== GERAR PIX OFICIAL =====
+function generatePix(key, name, city, amount) {
 
-  if (config.panel.banner) embed.setImage(config.panel.banner);
+  const formattedAmount = amount.toFixed(2);
 
-  return embed;
+  const payload =
+    "000201" +
+    "26580014BR.GOV.BCB.PIX01" +
+    key.length.toString().padStart(2, "0") +
+    key +
+    "52040000" +
+    "5303986" +
+    "54" + formattedAmount.length.toString().padStart(2, "0") + formattedAmount +
+    "5802BR" +
+    "59" + name.length.toString().padStart(2, "0") + name +
+    "60" + city.length.toString().padStart(2, "0") + city +
+    "62070503***" +
+    "6304";
+
+  const crc = crc16(payload);
+  return payload + crc;
 }
 
+// ===== REGISTRAR COMANDO =====
 client.once("ready", async () => {
   console.log("Bot online");
 
   const commands = [
     new SlashCommandBuilder()
       .setName("painel")
-      .setDescription("Configurar painel")
-      .addSubcommand(s =>
-        s.setName("configurar")
-         .setDescription("Abrir editor do painel"))
+      .setDescription("Criar painel da loja")
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -62,181 +86,77 @@ client.once("ready", async () => {
   );
 });
 
+// ===== INTERAÇÕES =====
 client.on("interactionCreate", async interaction => {
 
+  const db = loadDB();
   const config = loadConfig();
 
-  // ===== COMANDO =====
+  // CRIAR PAINEL
   if (interaction.isChatInputCommand()) {
 
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: "❌ Apenas administradores.", ephemeral: true });
-    }
-
-    const editor = new EmbedBuilder()
-      .setTitle("⚙️ Editor de Painel")
-      .setDescription("Configure seu painel abaixo.")
+    const embed = new EmbedBuilder()
+      .setTitle("🛒 Loja Oficial")
+      .setDescription("Selecione um produto abaixo.")
       .setColor(0x7c3aed);
 
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("edit_title").setLabel("Editar Título").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("edit_desc").setLabel("Editar Descrição").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("edit_banner").setLabel("Editar Banner").setStyle(ButtonStyle.Primary),
-    );
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("select_product")
+      .setPlaceholder("Escolha um produto")
+      .addOptions(
+        db.products.map(p => ({
+          label: p.name,
+          description: `R$ ${p.price}`,
+          value: p.id
+        }))
+      );
 
-    const row2 = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("manage_products").setLabel("Produtos").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("edit_pix").setLabel("Editar PIX").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("save_panel").setLabel("Salvar Painel").setStyle(ButtonStyle.Success)
-    );
+    const row = new ActionRowBuilder().addComponents(menu);
+
+    await interaction.channel.send({
+      embeds: [embed],
+      components: [row]
+    });
 
     return interaction.reply({
-      embeds: [editor],
-      components: [row, row2],
+      content: "Painel criado com sucesso.",
       ephemeral: true
     });
   }
 
-  // ===== BOTÕES =====
-  if (interaction.isButton()) {
+  // SELECIONAR PRODUTO
+  if (interaction.isStringSelectMenu()) {
 
-    // EDITAR TÍTULO
-    if (interaction.customId === "edit_title") {
-      const modal = new ModalBuilder()
-        .setCustomId("modal_title")
-        .setTitle("Editar Título");
+    const product = db.products.find(p => p.id === interaction.values[0]);
+    if (!product) return;
 
-      const input = new TextInputBuilder()
-        .setCustomId("title")
-        .setLabel("Novo título")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
+    const pixCode = generatePix(
+      config.pixKey,
+      config.receiverName,
+      config.receiverCity,
+      product.price
+    );
 
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
-    }
+    const qrBuffer = await QRCode.toBuffer(pixCode);
+    const attachment = new AttachmentBuilder(qrBuffer, { name: "pix.png" });
 
-    // EDITAR DESCRIÇÃO
-    if (interaction.customId === "edit_desc") {
-      const modal = new ModalBuilder()
-        .setCustomId("modal_desc")
-        .setTitle("Editar Descrição");
+    const embed = new EmbedBuilder()
+      .setTitle("💳 Pagamento PIX")
+      .addFields(
+        { name: "Produto", value: product.name },
+        { name: "Valor", value: `R$ ${product.price.toFixed(2)}` },
+        { name: "PIX Copia e Cola", value: `\`\`\`${pixCode}\`\`\`` }
+      )
+      .setImage("attachment://pix.png")
+      .setColor(0x22c55e);
 
-      const input = new TextInputBuilder()
-        .setCustomId("desc")
-        .setLabel("Nova descrição")
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
-    }
-
-    // EDITAR BANNER
-    if (interaction.customId === "edit_banner") {
-      const modal = new ModalBuilder()
-        .setCustomId("modal_banner")
-        .setTitle("Editar Banner");
-
-      const input = new TextInputBuilder()
-        .setCustomId("banner")
-        .setLabel("URL da imagem")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal);
-    }
-
-    // GERENCIAR PRODUTOS
-    if (interaction.customId === "manage_products") {
-      const modal = new ModalBuilder()
-        .setCustomId("modal_product")
-        .setTitle("Adicionar Produto");
-
-      const name = new TextInputBuilder()
-        .setCustomId("name")
-        .setLabel("Nome do Produto")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const price = new TextInputBuilder()
-        .setCustomId("price")
-        .setLabel("Preço")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(name),
-        new ActionRowBuilder().addComponents(price)
-      );
-
-      return interaction.showModal(modal);
-    }
-
-    // SALVAR PAINEL
-    if (interaction.customId === "save_panel") {
-
-      if (!config.panel.channelId)
-        config.panel.channelId = interaction.channel.id;
-
-      const channel = await client.channels.fetch(config.panel.channelId);
-
-      const embed = createPanelEmbed(config);
-
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId("select_product")
-        .setPlaceholder("Escolha um produto")
-        .addOptions(
-          config.products.map(p => ({
-            label: p.name,
-            description: `R$ ${p.price}`,
-            value: p.name
-          }))
-        );
-
-      const row = new ActionRowBuilder().addComponents(menu);
-
-      if (config.panel.messageId) {
-        const msg = await channel.messages.fetch(config.panel.messageId);
-        await msg.edit({ embeds: [embed], components: [row] });
-      } else {
-        const msg = await channel.send({ embeds: [embed], components: [row] });
-        config.panel.messageId = msg.id;
-      }
-
-      saveConfig(config);
-
-      return interaction.reply({ content: "✅ Painel salvo/atualizado.", ephemeral: true });
-    }
-  }
-
-  // ===== MODAIS =====
-  if (interaction.isModalSubmit()) {
-
-    if (interaction.customId === "modal_title") {
-      config.panel.title = interaction.fields.getTextInputValue("title");
-    }
-
-    if (interaction.customId === "modal_desc") {
-      config.panel.description = interaction.fields.getTextInputValue("desc");
-    }
-
-    if (interaction.customId === "modal_banner") {
-      config.panel.banner = interaction.fields.getTextInputValue("banner");
-    }
-
-    if (interaction.customId === "modal_product") {
-      const name = interaction.fields.getTextInputValue("name");
-      const price = interaction.fields.getTextInputValue("price");
-
-      config.products.push({ name, price });
-    }
-
-    saveConfig(config);
-
-    return interaction.reply({ content: "Salvo com sucesso.", ephemeral: true });
+    await interaction.reply({
+      embeds: [embed],
+      files: [attachment],
+      ephemeral: true
+    });
   }
 
 });
+
 client.login(TOKEN);
