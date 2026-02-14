@@ -1,14 +1,4 @@
 {
-  "products": [
-    {
-      "id": "key10",
-      "name": "Key R$10",
-      "price": 10
-    },
-    {
-      "id": "key20",
-      "name": "Key R$20",
-      "price": 20
-    }
-  ]
+  "products": [],
+  "orders": []
 }
